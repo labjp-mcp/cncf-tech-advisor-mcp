@@ -1,5 +1,6 @@
 package io.mcp.cncf.tool;
 
+import java.text.Normalizer;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -53,14 +54,29 @@ final class ContentSanitizer {
     private static final Pattern EXOTIC_LINE_BREAKS = Pattern.compile("\\r\\n|[\\r\\u0085\\u2028\\u2029]");
 
     /**
-     * Characters with no visible width: C0 and C1 controls other than tab and newline, the
-     * zero-width characters, the bidirectional overrides and isolates (Trojan Source), and
-     * the byte order mark. Placed inside a marker (a zero-width space between the first two
-     * brackets of {@code <<<}) they hide it from the patterns above while a reader still
-     * sees {@code <<<}; and each one costs six characters once JSON-escaped.
+     * Characters with no visible width: C0 and C1 controls other than tab and newline; the
+     * whole Unicode "format" category (zero-width space, joiner and non-joiner, word
+     * joiner, soft hyphen, the bidirectional overrides and isolates of Trojan Source, the
+     * Mongolian vowel separator, the byte order mark); the variation selectors, both
+     * blocks; the combining grapheme joiner; and the Hangul fillers, which are letters by
+     * category but render as nothing. Placed inside a marker (a soft hyphen between the
+     * first two brackets of {@code <<<}) they hide it from the patterns above while a reader
+     * still sees {@code <<<}; and each one costs six characters once JSON-escaped. The
+     * pentest found the soft hyphen, the fillers and the variation selectors surviving the
+     * previous, enumerated list.
      */
     private static final Pattern INVISIBLE = Pattern.compile(
-            "[\\p{Cc}&&[^\\n\\t]]|[\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]");
+            "[\\p{Cc}&&[^\\n\\t]]|[\\p{Cf}\\u034F\\u115F\\u1160\\u3164\\uFFA0\\uFE00-\\uFE0F]|[\\x{E0100}-\\x{E01EF}]");
+
+    /**
+     * How many times the whole pipeline runs before the output is taken as final. Each
+     * pass decodes one layer of HTML entities: {@code &amp;lt;} becomes {@code &lt;} on the
+     * first and {@code <} on the second, and only then can the marker rule see it. Running
+     * to a fixed point is what makes the sanitizer idempotent on hostile input as well as on
+     * benign; a bound keeps a pathological value from turning it into a loop. Three layers
+     * is one more than any renderer decodes.
+     */
+    private static final int MAX_PASSES = 3;
 
     private static final Pattern EXCESS_BLANK_LINES = Pattern.compile("\n{3,}");
 
@@ -80,13 +96,30 @@ final class ContentSanitizer {
         if (raw == null || raw.isBlank()) {
             return "";
         }
+        String text = raw;
+        for (int pass = 0; pass < MAX_PASSES; pass++) {
+            String next = cleanOnce(text);
+            if (next.equals(text)) {
+                return text;
+            }
+            text = next;
+        }
+        return text;
+    }
 
+    private static String cleanOnce(String raw) {
         // Parse as HTML even when the field is plain text: wholeText() decodes entities
         // and drops tags without introducing markup of its own.
         String text = Jsoup.parse(raw, "", Parser.htmlParser()).wholeText();
 
         text = EXOTIC_LINE_BREAKS.matcher(text).replaceAll("\n");
-        // Before the marker rules, so a zero-width character cannot keep a run apart.
+        // Compatibility normalisation folds the look-alikes onto the ASCII the marker rules
+        // know: fullwidth and small brackets and equals signs (U+FF1C, U+FE64, U+FF1D)
+        // read as <<< and === to a model and matched nothing before. It also folds
+        // ligatures and superscripts, which costs a description nothing it needs, and maps
+        // the no-break space to a plain one.
+        text = Normalizer.normalize(text, Normalizer.Form.NFKC);
+        // Before the marker rules, so an invisible character cannot keep a run apart.
         text = INVISIBLE.matcher(text).replaceAll("");
 
         // Fence labels first: once split they no longer contain "<<<", so the generic
@@ -94,9 +127,6 @@ final class ContentSanitizer {
         text = FENCE_LABEL.matcher(text).replaceAll("<< < $1");
         text = STRUCTURAL_MARKER.matcher(text).replaceAll(m -> breakRun(m.group(1)));
         text = EXCESS_BLANK_LINES.matcher(text).replaceAll("\n\n");
-        // Non-breaking spaces survive entity decoding and would otherwise reach the
-        // model as opaque characters.
-        text = text.replace(' ', ' ');
 
         return text.strip();
     }

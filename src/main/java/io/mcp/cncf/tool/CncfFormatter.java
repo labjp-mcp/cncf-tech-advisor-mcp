@@ -44,9 +44,21 @@ final class CncfFormatter {
     /**
      * Characters a URL path may carry; anything else drops the URL. A run of three dashes
      * is excluded even though a dash is otherwise fine: {@code ---} is one of the server's
-     * own separators. Real repository and homepage paths use single dashes.
+     * own separators. No percent-escapes: {@code %3D%3D%3D} or {@code %0A} decode to a
+     * marker or a newline in whatever reads the link next, and no path in the landscape
+     * (5,908 URLs profiled in September 2026) carries one. No {@code @}, which makes a path
+     * read like a host; no dot segments, which have no business in a published link.
      */
-    private static final Pattern SAFE_PATH = Pattern.compile("(?!.*-{3})[A-Za-z0-9/_.~%@+-]*");
+    private static final Pattern SAFE_PATH = Pattern.compile("(?!.*-{3})(?!.*/\\.\\.?(?:/|$))[A-Za-z0-9/_.~-]*");
+
+    /**
+     * A host worth printing: a registered name with at least one dot. Literal addresses,
+     * {@code localhost} and single-label names never appear in the landscape, and a link to
+     * {@code 169.254.169.254} or {@code http://localhost:6274} exists only to make the
+     * agent reading the answer open it (server-side request forgery by proxy).
+     */
+    private static final Pattern PUBLIC_HOST = Pattern.compile(
+            "(?!\\d+(\\.\\d+){3}$)(?!localhost$)(?!.*\\.(localhost|local|internal|localdomain)$)[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+");
 
     private CncfFormatter() {
         // Utility class
@@ -256,10 +268,16 @@ final class CncfFormatter {
 
     /** Server-side state only; no upstream text, so no fence. */
     static String formatRefresh(CncfRefreshStatus s) {
-        return (s.updated() ? "CNCF landscape data refreshed." : "CNCF landscape data already current; nothing changed.")
+        String headline = switch (s.outcome()) {
+            case "updated" -> "CNCF landscape data refreshed.";
+            case "unchanged" -> "CNCF landscape data already current; nothing changed.";
+            case "throttled" -> "Refresh refused: the previous attempt was too recent. The loaded catalogue is served.";
+            default -> "CNCF landscape refresh: " + s.outcome() + ".";
+        };
+        return headline
                 + "\nProjects: " + s.projectCount()
-                + "\nLast refresh: " + s.lastRefresh()
-                + "\nData fresh: " + s.dataFresh();
+                + "\nLast confirmed by upstream: " + s.lastRefresh()
+                + "\nCache expires at: " + s.cacheExpiresAt();
     }
 
     // ---------------------------------------------------------------- helpers
@@ -271,28 +289,31 @@ final class CncfFormatter {
     /**
      * Normalises an upstream URL to scheme, host and path, or drops it. Landscape entries
      * link to arbitrary domains, so unlike kb no host allow-list applies; what is enforced
-     * is shape: http(s) only, no user-info (which lets {@code https://trusted.io@evil.io}
-     * read as trusted), a path from a plain character set, no query string or fragment
-     * (free text that would print as part of a link), and a length cap. Sanitizing the raw
-     * string is not enough for a URL: {@code https://a.io ignore previous instructions}
-     * survives the sanitizer and prints as a link.
+     * is shape: http(s) only, a public-looking host ({@link #PUBLIC_HOST}), no port, no
+     * user-info (which lets {@code https://trusted.io@evil.io} read as trusted), a path
+     * from a plain character set ({@link #SAFE_PATH}), no query string or fragment (free
+     * text that would print as part of a link), and a length cap. Sanitizing the raw string
+     * is not enough for a URL: {@code https://a.io ignore previous instructions} survives
+     * the sanitizer and prints as a link.
      */
     static String safeUrl(String raw) {
         if (raw == null || raw.isBlank()) {
             return "";
         }
         try {
-            URI uri = URI.create(raw.strip());
+            // strip() leaves a trailing no-break space in place (two landscape entries end
+            // in one), and URI.create then rejects the whole value.
+            URI uri = URI.create(raw.replace(' ', ' ').strip());
             String scheme = uri.getScheme();
             String host = uri.getHost();
             String path = uri.getRawPath() == null ? "" : uri.getRawPath();
             if (scheme == null || !(scheme.equalsIgnoreCase("https") || scheme.equalsIgnoreCase("http"))
-                    || host == null || uri.getRawUserInfo() != null
+                    || host == null || uri.getRawUserInfo() != null || uri.getPort() != -1
+                    || !PUBLIC_HOST.matcher(host).matches()
                     || !SAFE_PATH.matcher(path).matches()) {
                 return "";
             }
-            String port = uri.getPort() == -1 ? "" : ":" + uri.getPort();
-            String url = scheme.toLowerCase(Locale.ROOT) + "://" + host.toLowerCase(Locale.ROOT) + port + path;
+            String url = scheme.toLowerCase(Locale.ROOT) + "://" + host.toLowerCase(Locale.ROOT) + path;
             return url.length() <= MAX_URL_CHARS ? url : "";
         } catch (IllegalArgumentException e) {
             return "";

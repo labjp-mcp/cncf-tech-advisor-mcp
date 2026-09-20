@@ -5,11 +5,11 @@ import io.mcp.cncf.model.CncfModel.CncfProject;
 import io.mcp.cncf.model.CncfModel.SearchQuery;
 import io.mcp.cncf.model.CncfModel.SearchResult;
 import io.mcp.cncf.service.CncfDataRefreshService;
+import io.mcp.cncf.service.CncfDataRefreshService.Outcome;
 import io.mcp.cncf.tool.model.CncfCategoryList;
 import io.mcp.cncf.tool.model.CncfProjectDetail;
 import io.mcp.cncf.tool.model.CncfRefreshStatus;
 import io.mcp.cncf.tool.model.CncfSearchResult;
-import io.mcp.cncf.util.ErrorHandler;
 import io.quarkiverse.mcp.server.MetaKey;
 import io.quarkiverse.mcp.server.TextContent;
 import io.quarkiverse.mcp.server.Tool;
@@ -24,7 +24,9 @@ import jakarta.validation.constraints.Size;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static io.mcp.cncf.config.SearchConstants.MAX_NAME_CHARS;
 import static io.mcp.cncf.config.SearchConstants.MAX_QUERY_LENGTH;
@@ -40,8 +42,10 @@ import static io.mcp.cncf.config.SearchConstants.MIN_SEARCH_RESULTS;
  * from the server's own. The same cleaned record feeds both the text and the
  * {@code structuredContent} channel.
  *
- * <p>The three read tools are {@link Blocking}: they may trigger a synchronous download of
- * the landscape, so they must run on a worker thread rather than on the event loop.
+ * <p>Every call passes the {@link RateLimiter} first and is written to the
+ * {@link ToolAuditLog} last. The three read tools are {@link Blocking}: when the catalogue is
+ * due they trigger a synchronous download, so they must run on a worker thread rather than
+ * on the event loop. Most calls never download -- see {@link CncfDataRefreshService}.
  *
  * <p>The Jakarta constraints on the arguments are not enforced by a validator -- there is
  * none on the classpath. They exist for the schema generator, which turns them into
@@ -53,6 +57,12 @@ public class CncfTool {
 
     @Inject
     CncfDataRefreshService refreshService;
+
+    @Inject
+    RateLimiter rateLimiter;
+
+    @Inject
+    ToolAuditLog audit;
 
     @Tool(
             name = "search_cncf",
@@ -84,20 +94,26 @@ public class CncfTool {
             @Size(max = MAX_QUERY_LENGTH) String category,
             @ToolArg(description = "Max results, 1-100", defaultValue = "10", required = false)
             @Min(MIN_SEARCH_RESULTS) @Max(MAX_SEARCH_RESULTS) Integer limit) {
-        try {
-            List<CncfProject> projects = loadProjects();
-            if (projects.isEmpty()) {
-                return ToolResponse.error("No CNCF projects available. Please try again later.");
-            }
-
+        return guarded("search_cncf", query == null || query.isBlank() ? category : query, () -> {
             String keyword = normalize(query);
             String categoryFilter = normalize(category);
-            SearchQuery searchQuery = new SearchQuery(
-                    keyword.isEmpty() ? null : keyword,
-                    categoryFilter.isEmpty() ? null : categoryFilter,
-                    null, // tag filter
-                    null, // maturity filter
-                    clampLimit(limit));
+            SearchQuery searchQuery;
+            try {
+                searchQuery = new SearchQuery(
+                        keyword.isEmpty() ? null : keyword,
+                        categoryFilter.isEmpty() ? null : categoryFilter,
+                        null, // tag filter
+                        null, // maturity filter
+                        clampLimit(limit));
+            } catch (IllegalArgumentException e) {
+                // The record's own messages: this server's text, safe to relay.
+                return ToolResponse.error("Invalid request: " + e.getMessage());
+            }
+
+            List<CncfProject> projects = refreshService.currentProjects();
+            if (projects.isEmpty()) {
+                return catalogueUnavailable();
+            }
 
             List<SearchResult> results = performSearch(projects, searchQuery);
 
@@ -109,9 +125,7 @@ public class CncfTool {
                     ? CncfFormatter.formatNoResults(keyword, categoryFilter)
                     : CncfFormatter.formatSearchResults(structured, keyword, categoryFilter);
             return success(text, structured);
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("search_cncf", e);
-        }
+        });
     }
 
     @Tool(
@@ -134,14 +148,22 @@ public class CncfTool {
             @ToolArg(description = "Exact project name as listed in the landscape, e.g. 'Kubernetes' "
                     + "or 'Argo'; matched case-insensitively")
             @Size(max = MAX_NAME_CHARS) String projectName) {
-        try {
+        return guarded("get_cncf_project", projectName, () -> {
             String name = normalize(projectName);
             if (name.isEmpty()) {
                 return ToolResponse.error("Project name is required");
             }
+            if (name.length() > MAX_NAME_CHARS) {
+                // The schema publishes maxLength; the bound is enforced here, not by a validator.
+                return ToolResponse.error("Project name must be at most " + MAX_NAME_CHARS + " characters");
+            }
 
+            List<CncfProject> projects = refreshService.currentProjects();
+            if (projects.isEmpty()) {
+                return catalogueUnavailable();
+            }
             CncfProject found = null;
-            for (CncfProject project : loadProjects()) {
+            for (CncfProject project : projects) {
                 if (project.name().equalsIgnoreCase(name)) {
                     found = project;
                     break;
@@ -156,9 +178,7 @@ public class CncfTool {
 
             CncfProjectDetail structured = CncfFormatter.toProjectDetail(found);
             return success(CncfFormatter.formatProject(structured), structured);
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("get_cncf_project", e);
-        }
+        });
     }
 
     @Tool(
@@ -175,12 +195,14 @@ public class CncfTool {
             outputSchema = @Tool.OutputSchema(from = CncfCategoryList.class))
     @Blocking
     public ToolResponse listCncfCategories() {
-        try {
-            CncfCategoryList structured = CncfFormatter.toCategoryList(loadProjects());
+        return guarded("list_cncf_categories", "", () -> {
+            List<CncfProject> projects = refreshService.currentProjects();
+            if (projects.isEmpty()) {
+                return catalogueUnavailable();
+            }
+            CncfCategoryList structured = CncfFormatter.toCategoryList(projects);
             return success(CncfFormatter.formatCategories(structured), structured);
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("list_cncf_categories", e);
-        }
+        });
     }
 
     /**
@@ -192,9 +214,10 @@ public class CncfTool {
     @Tool(
             name = "refresh_cncf_data",
             title = "Refresh CNCF Landscape data",
-            description = "Force a reload of the in-memory CNCF Landscape catalogue from "
-                    + "landscape.cncf.io. The read tools refresh on their own, so this is only "
-                    + "needed after a known landscape change or to recover from a failed load.",
+            description = "Ask landscape.cncf.io whether the in-memory catalogue is current and reload "
+                    + "it if not. The read tools refresh on their own when the cache expires, so this "
+                    + "is only needed after a known landscape change or to recover from a failed load. "
+                    + "Refused ('throttled') when the previous attempt was seconds ago.",
             annotations = @Tool.Annotations(
                     readOnlyHint = false,
                     destructiveHint = false,
@@ -203,40 +226,57 @@ public class CncfTool {
             outputSchema = @Tool.OutputSchema(from = CncfRefreshStatus.class))
     @Blocking
     public ToolResponse refreshCncfData() {
-        // Synchronous on a worker thread, like the read tools. quarkus-mcp-server 2.0.0 does
-        // not encode a CompletableFuture<ToolResponse> that carries structured content (it
-        // fails with -32603 "Unable to encode ... UniCreateFromCompletionStage"), and a
-        // download that takes a few seconds needs no asynchrony of its own.
-        try {
-            boolean updated = refreshService.forceRefresh();
-            String error = refreshService.getLastError();
-            if (!updated && error != null) {
-                // The message comes from an exception, which may quote upstream bytes; it
-                // is clipped and cleaned before it reaches the model.
-                return ToolResponse.error("Failed to refresh CNCF data: "
-                        + ContentSanitizer.label(error, SearchConstants.MAX_SUMMARY_CHARS));
+        // Synchronous on a worker thread, like the read tools. quarkus-mcp-server 2.0.x does
+        // not encode a CompletableFuture<ToolResponse> that carries structured content, and
+        // a download that takes a few seconds needs no asynchrony of its own.
+        return guarded("refresh_cncf_data", "", () -> {
+            Outcome outcome = refreshService.forceRefresh();
+            if (outcome == Outcome.FAILED) {
+                // Always one of the service's own sentences (see LandscapeUnavailableException).
+                return ToolResponse.error("Failed to refresh CNCF data: " + refreshService.getLastError());
             }
             CncfRefreshStatus status = new CncfRefreshStatus(
-                    updated,
+                    outcome.name().toLowerCase(Locale.ROOT),
                     refreshService.getCurrentProjects().size(),
                     refreshService.getLastRefresh().toString(),
-                    refreshService.isDataFresh());
+                    refreshService.getNextAttemptAt().toString());
             return success(CncfFormatter.formatRefresh(status), status);
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("refresh_cncf_data", e);
-        }
+        });
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /**
+     * Runs one tool call behind the rate limiter and in front of the audit log, and turns
+     * any escaping exception into a generic error. Every tool goes through here.
+     */
+    private ToolResponse guarded(String tool, String argument, Supplier<ToolResponse> body) {
+        if (!rateLimiter.tryAcquire()) {
+            audit.recordDenied(tool, "rate limit");
+            return ToolResponse.error(ToolErrors.rateLimited(rateLimiter.callsPerMinute()));
+        }
+        long started = System.nanoTime();
+        ToolResponse response;
+        try {
+            response = body.get();
+        } catch (Exception e) {
+            response = ToolErrors.internal(tool, e);
+        }
+        audit.record(tool, argument, response.isError() ? "error" : "ok", (System.nanoTime() - started) / 1_000_000);
+        return response;
+    }
 
     /** Both channels: prose for the model, structured data for the client. */
     private static ToolResponse success(String text, Object structured) {
         return new ToolResponse(false, List.of(new TextContent(text)), structured, Map.<MetaKey, Object>of());
     }
 
-    private List<CncfProject> loadProjects() {
-        refreshService.refreshData();
-        return refreshService.getCurrentProjects();
+    /** No catalogue loaded: says why, in the service's own words, and what to do. */
+    private ToolResponse catalogueUnavailable() {
+        String reason = refreshService.getLastError();
+        return ToolResponse.error("The CNCF Landscape catalogue is not loaded"
+                + (reason == null ? "" : ": " + reason)
+                + " Retry shortly, or call refresh_cncf_data.");
     }
 
     private static String normalize(String value) {

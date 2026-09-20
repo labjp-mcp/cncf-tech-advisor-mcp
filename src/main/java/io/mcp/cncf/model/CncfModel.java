@@ -6,8 +6,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Essential CNCF data models for MCP server.
- * Only what's actually used - no over-engineering.
+ * Essential CNCF data models for MCP server. Only what the tools use.
  */
 public final class CncfModel {
 
@@ -38,16 +37,6 @@ public final class CncfModel {
 
         public boolean isPopular() {
             return metadata != null && metadata.stars() >= 1000;
-        }
-
-        public String getQualityRating() {
-            if (metadata == null) return "⭐⭐";
-
-            double stars = metadata.stars();
-            if (stars >= 10000) return "⭐⭐⭐⭐⭐";
-            if (stars >= 1000) return "⭐⭐⭐⭐";
-            if (stars >= 100) return "⭐⭐⭐";
-            return "⭐⭐";
         }
 
         public boolean isGraduated() {
@@ -93,7 +82,8 @@ public final class CncfModel {
     }
 
     /**
-     * Search query.
+     * Search query. The constructor's checks are the ones whose messages reach the model
+     * verbatim (they are this server's own text), so they say what to change.
      */
     public record SearchQuery(
         String keyword,
@@ -109,17 +99,14 @@ public final class CncfModel {
             if (keyword != null && keyword.length() < SearchConstants.MIN_QUERY_LENGTH) {
                 throw new IllegalArgumentException("Keyword must be at least " + SearchConstants.MIN_QUERY_LENGTH + " characters");
             }
-        }
-
-        public boolean hasFilters() {
-            return keyword != null && !keyword.isBlank();
-        }
-
-        public String getScope() {
-            if (category != null && !category.isBlank()) {
-                return "category: " + category;
+            // The published inputSchema says maxLength; nothing on the classpath enforces it,
+            // so the bound is applied here. A 100 KB keyword is not a search, it is a load.
+            if (keyword != null && keyword.length() > SearchConstants.MAX_QUERY_LENGTH) {
+                throw new IllegalArgumentException("Keyword must be at most " + SearchConstants.MAX_QUERY_LENGTH + " characters");
             }
-            return keyword != null ? "keyword: " + keyword : "all projects";
+            if (category != null && category.length() > SearchConstants.MAX_QUERY_LENGTH) {
+                throw new IllegalArgumentException("Category must be at most " + SearchConstants.MAX_QUERY_LENGTH + " characters");
+            }
         }
     }
 
@@ -138,63 +125,6 @@ public final class CncfModel {
             }
             Objects.requireNonNull(project, "Project cannot be null");
         }
-
-        public boolean isHighRelevance() {
-            return relevanceScore >= SearchConstants.CONFIDENCE_THRESHOLD;
-        }
-
-        public String getSummary() {
-            return project.name() + " (" + project.category() + ") - Score: " + String.format("%.1f", relevanceScore);
-        }
-    }
-
-    /**
-     * Calculate relevance score for search.
-     */
-    public static double calculateRelevanceScore(String query, CncfProject project) {
-        double score = 0.0;
-
-        if (query == null || query.isBlank()) {
-            return 0.0;
-        }
-
-        String lowerQuery = query.toLowerCase();
-
-        // Name matching (highest weight)
-        if (project.name().toLowerCase().contains(lowerQuery)) {
-            score += 40;
-        }
-
-        // Description matching
-        if (project.description() != null &&
-            project.description().toLowerCase().contains(lowerQuery)) {
-            score += 25;
-        }
-
-        // Tag matching
-        if (project.tags() != null) {
-            long tagMatches = project.tags().stream()
-                .filter(tag -> tag.toLowerCase().contains(lowerQuery))
-                .count();
-            score += tagMatches * 10;
-        }
-
-        // Category matching
-        if (project.category().toLowerCase().contains(lowerQuery)) {
-            score += 20;
-        }
-
-        // Popularity boost
-        if (project.isPopular()) {
-            score += 15;
-        }
-
-        // Graduation boost
-        if (project.isGraduated()) {
-            score += 10;
-        }
-
-        return Math.min(score, 100.0);
     }
 
     private CncfModel() {

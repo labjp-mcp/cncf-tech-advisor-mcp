@@ -91,7 +91,7 @@ class CncfToolsProtocolTest {
                             "search_cncf", List.of("count", "catalogueSize", "projects"),
                             "get_cncf_project", List.of("name", "stars", "activelyMaintained", "description", "tags"),
                             "list_cncf_categories", List.of("totalProjects", "categories"),
-                            "refresh_cncf_data", List.of("updated", "projectCount", "lastRefresh", "dataFresh"));
+                            "refresh_cncf_data", List.of("outcome", "projectCount", "lastRefresh", "cacheExpiresAt"));
                     expected.forEach((name, fields) -> {
                         JsonObject schema = page.findByName(name).outputSchema();
                         assertThat(schema).as("%s outputSchema", name).isNotNull();
@@ -176,7 +176,7 @@ class CncfToolsProtocolTest {
                 .toolsCall("refresh_cncf_data", Map.of(), response -> {
                     JsonObject s = structured(response);
                     assertThat(s.getInteger("projectCount")).isEqualTo(6);
-                    assertThat(s.getBoolean("dataFresh")).isTrue();
+                    assertThat(s.getString("outcome")).isIn("updated", "unchanged");
                 })
                 .thenAssertResults();
     }

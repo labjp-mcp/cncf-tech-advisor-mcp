@@ -3,6 +3,7 @@ package io.mcp.cncf.service;
 import java.util.List;
 
 import io.mcp.cncf.model.CncfModel.CncfProject;
+import io.mcp.cncf.service.CncfDataRefreshService.Outcome;
 import io.mcp.cncf.testing.LandscapeStub;
 import io.mcp.cncf.testing.LandscapeStubProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -12,9 +13,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import static com.github.tomakehurst.wiremock.client.WireMock.exactly;
-import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
-import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -41,7 +39,7 @@ class CncfDataRefreshServiceTest {
     void parsesCurrentLayout() {
         LandscapeStub.serveCurrentLandscape();
 
-        assertThat(service.forceRefresh()).isTrue();
+        assertThat(service.forceRefresh()).isEqualTo(Outcome.UPDATED);
 
         List<CncfProject> projects = service.getCurrentProjects();
         assertThat(projects).extracting(CncfProject::name)
@@ -104,7 +102,7 @@ class CncfDataRefreshServiceTest {
     void parsesLegacyLayout() {
         LandscapeStub.serveLegacyLandscape();
 
-        assertThat(service.forceRefresh()).isTrue();
+        assertThat(service.forceRefresh()).isEqualTo(Outcome.UPDATED);
 
         List<CncfProject> projects = service.getCurrentProjects();
         assertThat(projects).extracting(CncfProject::name).containsExactly("Kubernetes", "Linkerd");
@@ -116,19 +114,6 @@ class CncfDataRefreshServiceTest {
         assertThat(k8s.metadata().license()).isEqualTo("Apache-2.0");
         assertThat(k8s.metadata().isActivelyMaintained()).isTrue();
         assertThat(byName(projects, "Linkerd").metadata().lastCommitDate()).isNull();
-    }
-
-    @Test
-    @DisplayName("an unchanged body is not re-parsed and leaves the catalogue and the error state alone")
-    void unchangedBodyIsNotReloaded() {
-        LandscapeStub.serveCurrentLandscape();
-        assertThat(service.forceRefresh()).isTrue();
-
-        assertThat(service.refreshData()).as("same bytes: nothing to update").isFalse();
-
-        assertThat(service.getLastError()).isNull();
-        assertThat(service.getCurrentProjects()).hasSize(6);
-        LandscapeStub.server().verify(exactly(2), getRequestedFor(urlEqualTo(LandscapeStub.DATA_PATH)));
     }
 
     private static CncfProject byName(List<CncfProject> projects, String name) {

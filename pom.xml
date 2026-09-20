@@ -16,14 +16,18 @@
              CVE-2026-39852 (quarkus-vertx-http authorization bypass) and 3.33.3.2 is the
              current patch of that line. Same version as mcp-redhat-kb. -->
         <quarkus.platform.version>3.33.3.2</quarkus.platform.version>
-        <!-- 2.0.0 implements MCP specification 2026-07-28 (stateless core,
+        <!-- 2.0.x implements MCP specification 2026-07-28 (stateless core,
              server/discover) and is built against Quarkus 3.33.3.x, the platform line
-             pinned above. Versions of the individual artifacts come from its BOM. -->
-        <quarkus-mcp-server.version>2.0.0</quarkus-mcp-server.version>
+             pinned above. 2.0.1 (2026-09-11) is a bug-fix release on the same line: scoped
+             list-changed notifications, JSON-RPC errors for param-less completion/logging
+             requests, request context for server/discover filters. No API change. Versions
+             of the individual artifacts come from its BOM. -->
+        <quarkus-mcp-server.version>2.0.1</quarkus-mcp-server.version>
         <jsoup.version>1.23.2</jsoup.version>
-        <!-- Must match the jsonschema-generator line quarkus-mcp-server 2.0.0 is built
-             against (verified with dependency:tree): a mismatch loads two copies of the
-             generator API. Check the extension's pom on upgrade. -->
+        <!-- Must match the jsonschema-generator line quarkus-mcp-server is built against
+             (2.0.1 parent pom: 4.38.0; verified with dependency:tree): a mismatch loads two
+             copies of the generator API. 5.0.0 exists but the extension has not moved to it,
+             so it is not taken here. Check the extension's pom on upgrade. -->
         <jsonschema-generator.version>4.38.0</jsonschema-generator.version>
         <!-- Test-only tooling, same lines as mcp-redhat-kb. -->
         <assertj.version>3.27.7</assertj.version>
@@ -54,11 +58,15 @@
     <dependencies>
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-rest-jackson</artifactId>
+            <artifactId>quarkus-arc</artifactId>
         </dependency>
+        <!-- Jackson for parsing full.json. The server publishes no REST endpoint of its own
+             and no longer uses the MicroProfile REST client (replaced by java.net.http behind
+             BoundedExchange, which caps bytes and wall-clock), so neither quarkus-rest nor
+             quarkus-rest-client are on the classpath: less surface, fewer CVEs to track. -->
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-arc</artifactId>
+            <artifactId>quarkus-jackson</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkiverse.mcp</groupId>
@@ -67,10 +75,6 @@
         <dependency>
             <groupId>io.quarkiverse.mcp</groupId>
             <artifactId>quarkus-mcp-server-stdio</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-rest-client-jackson</artifactId>
         </dependency>
         <!-- Strips HTML from CNCF Landscape text (descriptions, names) before it reaches
              the model. Same library and line as mcp-redhat-kb's ContentSanitizer. -->

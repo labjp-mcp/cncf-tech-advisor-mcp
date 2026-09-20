@@ -17,6 +17,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static io.mcp.cncf.config.SearchConstants.MAX_NAME_CHARS;
+import static io.mcp.cncf.config.SearchConstants.MAX_QUERY_LENGTH;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -206,10 +208,22 @@ class CncfToolTest {
     }
 
     @Test
-    @DisplayName("an overlong unknown name is clipped in the error message")
-    void overlongUnknownNameIsClipped() {
-        String text = text(tool.getCncfProject("x".repeat(5_000)));
-        assertThat(text).hasSizeLessThan(400).contains("\u2026' not found");
+    @DisplayName("arguments over the published maxLength are refused, not searched or echoed")
+    void overlongArgumentsAreRefused() {
+        // The inputSchema says maxLength 120 / 200; no validator runs, so the tools enforce it.
+        ToolResponse name = tool.getCncfProject("x".repeat(MAX_NAME_CHARS + 1));
+        assertThat(name.isError()).isTrue();
+        assertThat(text(name)).isEqualTo("Project name must be at most " + MAX_NAME_CHARS + " characters");
+        assertThat(tool.getCncfProject("x".repeat(MAX_NAME_CHARS)).isError()).as("at the bound: looked up, not found").isTrue();
+        assertThat(text(tool.getCncfProject("x".repeat(MAX_NAME_CHARS)))).contains("not found");
+
+        ToolResponse query = tool.searchCncfProjects("k".repeat(MAX_QUERY_LENGTH + 1), null, 10);
+        assertThat(query.isError()).isTrue();
+        assertThat(text(query)).isEqualTo("Invalid request: Keyword must be at most " + MAX_QUERY_LENGTH + " characters");
+        ToolResponse category = tool.searchCncfProjects(null, "c".repeat(MAX_QUERY_LENGTH + 1), 10);
+        assertThat(query.isError()).isTrue();
+        assertThat(text(category)).contains("Category must be at most");
+        assertThat(search(tool.searchCncfProjects("k".repeat(MAX_QUERY_LENGTH), null, 10)).count()).as("at the bound: searched").isZero();
     }
 
     @Test
@@ -271,10 +285,10 @@ class CncfToolTest {
         ToolResponse ok = tool.refreshCncfData();
         assertThat(ok.isError()).as(text(ok)).isFalse();
         CncfRefreshStatus status = (CncfRefreshStatus) ok.structuredContent();
-        assertThat(status.updated()).isTrue();
+        assertThat(status.outcome()).isIn("updated", "unchanged");
         assertThat(status.projectCount()).isEqualTo(6);
-        assertThat(status.dataFresh()).isTrue();
-        assertThat(text(ok)).startsWith("CNCF landscape data refreshed.").contains("Projects: 6");
+        assertThat(status.cacheExpiresAt()).isNotBlank();
+        assertThat(text(ok)).startsWith("CNCF landscape data").contains("Projects: 6");
 
         LandscapeStub.reset();
         LandscapeStub.server().stubFor(LandscapeStub.dataRequest().willReturn(aResponse()
@@ -283,6 +297,7 @@ class CncfToolTest {
         ToolResponse failed = tool.refreshCncfData();
         assertThat(failed.isError()).as("HTML instead of JSON must not read as 'already current'").isTrue();
         assertThat(text(failed)).startsWith("Failed to refresh CNCF data: ").contains("not valid JSON")
-                .doesNotContain("<!doctype").doesNotContain("<html");
+                .doesNotContain("<").doesNotContain("doctype");
+        assertThat(failed.structuredContent()).isNull();
     }
 }

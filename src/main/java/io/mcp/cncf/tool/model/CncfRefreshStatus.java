@@ -9,9 +9,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  */
 @RegisterForReflection(targets = { CncfRefreshStatus.class })
 public record CncfRefreshStatus(
-        @JsonPropertyDescription("Whether the catalogue changed as a result of this refresh; false "
-                + "when upstream data was identical to what was already loaded") boolean updated,
+        @JsonPropertyDescription("What the refresh did: 'updated' (new catalogue downloaded), "
+                + "'unchanged' (upstream confirmed the loaded catalogue is current) or 'throttled' "
+                + "(refused: the previous attempt was too recent; the loaded catalogue is served)") String outcome,
         @JsonPropertyDescription("Projects in the catalogue after the refresh") int projectCount,
-        @JsonPropertyDescription("Timestamp (ISO-8601, UTC) of the last successful refresh") String lastRefresh,
-        @JsonPropertyDescription("Whether the catalogue was refreshed within the last hour") boolean dataFresh) {
+        @JsonPropertyDescription("Timestamp (ISO-8601, UTC) of the last time upstream confirmed the catalogue") String lastRefresh,
+        @JsonPropertyDescription("Timestamp (ISO-8601, UTC) after which the read tools will consult upstream "
+                + "again on their own") String cacheExpiresAt) {
 }

@@ -15,9 +15,15 @@
 #   scripts/mcp-native-parity.sh
 #   JAR=... RUNNER=... PORT=... scripts/mcp-native-parity.sh
 #
+# It also calls two tools on each binary against a local stand-in of the landscape
+# (python3 http.server serving src/test/resources/landscape-current.json) and requires the
+# same structuredContent from both. tools/list cannot see a class the native image dropped
+# but a tool needs at call time -- Caffeine's cache nodes, chosen by name at runtime, failed
+# exactly that way once: catalogue identical, every call "Internal error".
+#
 # Exit status: 0 when the two catalogues are byte-identical after canonicalisation, every
-# tool carries annotations and every outputSchema declares at least one property; 1
-# otherwise, with the diff on stderr.
+# tool carries annotations, every outputSchema declares at least one property and both
+# binaries answer the two tool calls identically; 1 otherwise, with the diff on stderr.
 #
 # Both servers are driven over the stateless 2026-07-28 protocol, which is what a modern
 # client speaks. The shipped defaults are stdio on and HTTP off (a locally launched
@@ -42,14 +48,34 @@ if [[ -z "$RUNNER" || ! -x "$RUNNER" ]]; then
 fi
 
 SERVER_PID=""
+STUB_PID=""
 cleanup() {
-  if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-  fi
+  for pid in "$SERVER_PID" "$STUB_PID"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
   rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
+
+# A stand-in for landscape.cncf.io: the test fixture at /data/full.json, nothing else. The
+# fixture's clock placeholders are filled the way LandscapeStub does, so both binaries see
+# the same bytes and the "actively maintained" flag is deterministic.
+STUB_PORT="${STUB_PORT:-9099}"
+mkdir -p "$WORK_DIR/stub/data"
+python3 - "$REPO_ROOT/src/test/resources/landscape-current.json" "$WORK_DIR/stub/data/full.json" <<'PY'
+import sys, datetime
+src, dst = sys.argv[1], sys.argv[2]
+now = datetime.datetime.now(datetime.timezone.utc)
+iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")
+text = open(src).read().replace("__RECENT_COMMIT__", iso(now - datetime.timedelta(days=1))) \
+                       .replace("__STALE_COMMIT__", iso(now - datetime.timedelta(days=400)))
+open(dst, "w").write(text)
+PY
+python3 -m http.server "$STUB_PORT" --bind 127.0.0.1 --directory "$WORK_DIR/stub" > "$WORK_DIR/stub.log" 2>&1 &
+STUB_PID=$!
 
 URL="http://127.0.0.1:$PORT/mcp"
 
@@ -66,6 +92,18 @@ rpc() {
     -H "Mcp-Method: $method" \
     -H 'MCP-Protocol-Version: 2026-07-28' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":{$META}}"
+}
+
+# tools/call over the stateless protocol: the tool name travels in Mcp-Name as well.
+call_tool() {
+  local tool="$1" args="$2"
+  curl -sf -X POST "$URL" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H 'Mcp-Method: tools/call' \
+    -H "Mcp-Name: $tool" \
+    -H 'MCP-Protocol-Version: 2026-07-28' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args,$META}}"
 }
 
 # Starts one server, waits for it, records tools/list and how long start-up took.
@@ -102,6 +140,32 @@ capture() {
 
   rpc tools/list > "$WORK_DIR/$label.tools.raw.json"
 
+  # Two calls that exercise the download, the parser, the sanitizer, the fence and the
+  # rate limiter -- the code paths tools/list never touches.
+  {
+    call_tool list_cncf_categories '{}'
+    echo
+    call_tool search_cncf '{"query":"kube","limit":3}'
+  } > "$WORK_DIR/$label.calls.raw.json"
+  python3 - "$WORK_DIR/$label.calls.raw.json" "$WORK_DIR/$label.calls.json" "$label" <<'PY'
+import json, sys
+src, dst, label = sys.argv[1], sys.argv[2], sys.argv[3]
+out = []
+for line in open(src):
+    line = line.strip()
+    if not line:
+        continue
+    doc = json.loads(line)
+    if "result" not in doc or doc["result"].get("isError"):
+        print(f"[{label}] tool call failed: {json.dumps(doc)[:300]}", file=sys.stderr)
+        sys.exit(1)
+    # The text carries a per-response nonce; the structured record is what must match.
+    out.append(doc["result"]["structuredContent"])
+with open(dst, "w") as f:
+    json.dump(out, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+
   # Canonical form: sorted keys, fixed indentation. The two binaries serialise identically
   # today, but the comparison should not depend on that.
   python3 - "$WORK_DIR/$label.tools.raw.json" "$WORK_DIR/$label.tools.json" <<'PY'
@@ -135,6 +199,8 @@ COMMON_ARGS=(
   -Dquarkus.mcp.server.stdio.enabled=false
   -Dquarkus.banner.enabled=false
   -Dquarkus.log.level=INFO
+  -Dcncf.landscape.base-url="http://127.0.0.1:$STUB_PORT"
+  -Dcncf.landscape.request-timeout=PT5S
 )
 
 capture jvm java "${COMMON_ARGS[@]}" -jar "$JAR"
@@ -165,11 +231,16 @@ for path in sys.argv[1:]:
 sys.exit(1 if failed else 0)
 PY
 
-if diff -u "$WORK_DIR/jvm.tools.json" "$WORK_DIR/native.tools.json" >&2; then
-  count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["result"]["tools"]))' "$WORK_DIR/jvm.tools.json")
-  bytes=$(wc -c < "$WORK_DIR/jvm.tools.json" | tr -d ' ')
-  echo "tools/list is identical on JVM and native: $count tools, $bytes bytes of canonical JSON"
-else
+if ! diff -u "$WORK_DIR/jvm.tools.json" "$WORK_DIR/native.tools.json" >&2; then
   echo "tools/list differs between JVM and native (see diff above)" >&2
   exit 1
 fi
+if ! diff -u "$WORK_DIR/jvm.calls.json" "$WORK_DIR/native.calls.json" >&2; then
+  echo "tools/call results differ between JVM and native (see diff above)" >&2
+  exit 1
+fi
+count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["result"]["tools"]))' "$WORK_DIR/jvm.tools.json")
+bytes=$(wc -c < "$WORK_DIR/jvm.tools.json" | tr -d ' ')
+projects=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["totalProjects"])' "$WORK_DIR/jvm.calls.json")
+echo "tools/list is identical on JVM and native: $count tools, $bytes bytes of canonical JSON"
+echo "tools/call is identical on JVM and native: list_cncf_categories and search_cncf over a $projects-project stub"

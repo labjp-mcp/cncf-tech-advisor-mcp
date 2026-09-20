@@ -22,9 +22,9 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: graalvm/setup-graalvm@v1
+      - uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276 # v1.6.6
         with:
           java-version: '25'
           distribution: 'graalvm'
@@ -50,9 +50,9 @@ jobs:
           - os: ubuntu-latest
             artifact: mcp-cncf-tech-advisor-linux-x64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: graalvm/setup-graalvm@v1
+      - uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276 # v1.6.6
         with:
           java-version: '25'
           distribution: 'graalvm'
@@ -70,7 +70,7 @@ jobs:
         run: move target\*-runner target\${{ matrix.artifact }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ${{ matrix.artifact }}
           path: target/${{ matrix.artifact }}
@@ -85,7 +85,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Get version from tag
         id: version
@@ -93,7 +93,7 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - uses: graalvm/setup-graalvm@v1
+      - uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276 # v1.6.6
         with:
           java-version: '25'
           distribution: 'graalvm'
@@ -106,7 +106,7 @@ jobs:
           mv target/*-runner.jar target/mcp-cncf-tech-advisor.jar
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
 
@@ -121,7 +121,7 @@ jobs:
           ls -la release/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             release/mcp-cncf-tech-advisor.jar
@@ -196,12 +196,12 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -209,7 +209,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -219,7 +219,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
@@ -236,15 +236,15 @@ jobs:
     needs: [release, build-native]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
 
@@ -299,53 +299,53 @@ jobs:
           # Create bin directory and copy wrapper script
           mkdir -p npm/mcp-cncf-tech-advisor/bin
           cat > npm/mcp-cncf-tech-advisor/bin/index.js << 'EOF'
-#!/usr/bin/env node
+          #!/usr/bin/env node
 
-const childProcess = require('child_process');
+          const childProcess = require('child_process');
 
-const BINARY_MAP = {
-  darwin_arm64: {name: 'mcp-cncf-tech-advisor-darwin-arm64', suffix: ''},
-  darwin_x64: {name: 'mcp-cncf-tech-advisor-darwin-x64', suffix: ''},
-  linux_x64: {name: 'mcp-cncf-tech-advisor-linux-x64', suffix: ''},
-  win32_x64: {name: 'mcp-cncf-tech-advisor-windows-x64', suffix: '.exe'},
-};
+          const BINARY_MAP = {
+            darwin_arm64: {name: 'mcp-cncf-tech-advisor-darwin-arm64', suffix: ''},
+            darwin_x64: {name: 'mcp-cncf-tech-advisor-darwin-x64', suffix: ''},
+            linux_x64: {name: 'mcp-cncf-tech-advisor-linux-x64', suffix: ''},
+            win32_x64: {name: 'mcp-cncf-tech-advisor-windows-x64', suffix: '.exe'},
+          };
 
-// Resolving will fail if the optionalDependency was not installed or the platform/arch is not supported
-const resolveBinaryPath = () => {
-  try {
-    const binary = BINARY_MAP[`${process.platform}_${process.arch}`];
-    if (!binary) {
-      throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
-    }
-    return require.resolve(`${binary.name}/bin/${binary.name}${binary.suffix}`);
-  } catch (e) {
-    throw new Error(`Could not resolve binary path for platform/arch: ${process.platform}/${process.arch}. Please ensure you have the correct platform package installed.`);
-  }
-};
+          // Resolving will fail if the optionalDependency was not installed or the platform/arch is not supported
+          const resolveBinaryPath = () => {
+            try {
+              const binary = BINARY_MAP[`${process.platform}_${process.arch}`];
+              if (!binary) {
+                throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
+              }
+              return require.resolve(`${binary.name}/bin/${binary.name}${binary.suffix}`);
+            } catch (e) {
+              throw new Error(`Could not resolve binary path for platform/arch: ${process.platform}/${process.arch}. Please ensure you have the correct platform package installed.`);
+            }
+          };
 
-const child = childProcess.spawn(resolveBinaryPath(), process.argv.slice(2), {
-  stdio: 'inherit',
-  env: process.env,
-});
+          const child = childProcess.spawn(resolveBinaryPath(), process.argv.slice(2), {
+            stdio: 'inherit',
+            env: process.env,
+          });
 
-const handleSignal = (signal) => {
-  if (child && !child.killed) {
-    child.kill(signal);
-  }
-};
+          const handleSignal = (signal) => {
+            if (child && !child.killed) {
+              child.kill(signal);
+            }
+          };
 
-['SIGTERM', 'SIGINT', 'SIGHUP'].forEach((signal) => {
-  process.on(signal, () => handleSignal(signal));
-});
+          ['SIGTERM', 'SIGINT', 'SIGHUP'].forEach((signal) => {
+            process.on(signal, () => handleSignal(signal));
+          });
 
-child.on('close', (code, signal) => {
-  if (signal) {
-    process.exit(128 + (signal === 'SIGTERM' ? 15 : signal === 'SIGINT' ? 2 : 1));
-  } else {
-    process.exit(code || 0);
-  }
-});
-EOF
+          child.on('close', (code, signal) => {
+            if (signal) {
+              process.exit(128 + (signal === 'SIGTERM' ? 15 : signal === 'SIGINT' ? 2 : 1));
+            } else {
+              process.exit(code || 0);
+            }
+          });
+          EOF
           chmod +x npm/mcp-cncf-tech-advisor/bin/index.js
 
           # Generate package.json for main package with optionalDependencies
