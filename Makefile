@@ -1,4 +1,4 @@
-.PHONY: help build test clean native docker docker-run run dev package install format lint
+.PHONY: help build test clean native native-container native-parity docker docker-run docker-native run dev package install format lint
 
 # Default target
 help: ## Show this help message
@@ -23,8 +23,14 @@ build: ## Build the project (creates JAR)
 
 package: build ## Alias for build
 
-native: ## Build native executable
-	./mvnw clean package -Dnative -DskipTests
+native: ## Build native executable (also leaves the JVM package in target/quarkus-app)
+	./mvnw clean package -Pnative -DskipTests
+
+native-container: ## Build native executable inside the Mandrel builder image (no local GraalVM needed; Linux binary)
+	./mvnw clean package -Pnative -DskipTests -Dquarkus.native.container-build=true
+
+native-parity: ## Diff tools/list between the JVM package and the native executable
+	scripts/mcp-native-parity.sh
 
 test: ## Run all tests
 	./mvnw test
@@ -37,7 +43,11 @@ docker: ## Build Docker image
 	docker build -t cncf-tech-advisor-mcp:latest .
 
 docker-run: ## Run Docker container
-	docker run -i --rm -p 8080:8080 cncf-tech-advisor-mcp:latest
+	docker run -i --rm -p 127.0.0.1:8080:8080 cncf-tech-advisor-mcp:latest
+
+docker-native: ## Build the native images (needs a Linux target/*-runner: make native-container first)
+	docker build -f src/main/docker/Dockerfile.native -t cncf-tech-advisor-mcp:native .
+	docker build -f src/main/docker/Dockerfile.native-micro -t cncf-tech-advisor-mcp:native-micro .
 
 docker-push: docker ## Push Docker image to registry
 	docker tag cncf-tech-advisor-mcp:latest ghcr.io/jeanlopezxyz/cncf-tech-advisor-mcp:latest

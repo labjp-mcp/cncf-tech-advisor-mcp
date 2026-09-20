@@ -2,6 +2,8 @@ package io.mcp.cncf.client;
 
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;
 
 /**
@@ -32,7 +34,11 @@ public interface CncfLandscapeClient {
      *
      * @return Full CNCF landscape data as JSON string
      */
+    // The configured base URL is the site root (quarkus.rest-client.cncf-landscape-api.url),
+    // so the path must carry /data: with "/full.json" alone the single-page app answered
+    // its index.html with a 200, and every refresh failed on the first '<'.
     @GET
-    @Path("/full.json")
+    @Path("/data/full.json")
+    @Produces(MediaType.APPLICATION_JSON)
     String getFullLandscapeData();
 }

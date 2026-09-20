@@ -2,11 +2,13 @@ package io.mcp.cncf.service;
 
 import io.mcp.cncf.client.CncfLandscapeClient;
 import io.mcp.cncf.model.CncfModel.CncfProject;
+import io.mcp.cncf.model.CncfModel.ProjectMetadata;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
 import org.jboss.logging.Logger;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -21,6 +23,11 @@ import java.util.concurrent.ExecutorService;
 /**
  * Service for refreshing CNCF data with ETags for incremental updates.
  * Uses Java 25 virtual threads for efficient async operations.
+ *
+ * <p>Parses the layout landscape.cncf.io publishes today: each item lists its
+ * {@code repositories}, and GitHub metrics live in a top-level {@code github_data} map keyed
+ * by repository URL. The previous layout (metrics nested under the item as
+ * {@code github_data}, a flat {@code repo_url}) is still read as a fallback.
  */
 @ApplicationScoped
 public class CncfDataRefreshService {
@@ -31,7 +38,6 @@ public class CncfDataRefreshService {
     @Inject
     CncfLandscapeClient landscapeClient;
 
-    
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AtomicReference<String> lastETag = new AtomicReference<>();
     private final AtomicReference<Instant> lastRefresh = new AtomicReference<>(Instant.EPOCH);
@@ -39,7 +45,6 @@ public class CncfDataRefreshService {
     private final AtomicReference<String> lastError = new AtomicReference<>();
     private final AtomicReference<Instant> lastErrorTime = new AtomicReference<>();
 
-    
     // Java 25 Virtual Thread Executor
     private final ExecutorService virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
@@ -62,8 +67,13 @@ public class CncfDataRefreshService {
             // In a production environment, you might want to use a more advanced HTTP client
             landscapeData = landscapeClient.getFullLandscapeData();
 
+            // A response that is not a usable catalogue is a failed refresh and is recorded
+            // as one. These three branches used to return false without touching lastError,
+            // which left refresh_cncf_data reporting "already current; nothing changed" with
+            // zero projects after receiving HTML, an empty body or a JSON with no items --
+            // the exact answer the SPA's index.html produced when the client path was wrong.
             if (landscapeData == null || landscapeData.trim().isEmpty()) {
-                LOG.warn("Received empty data from CNCF Landscape API");
+                recordError("Received an empty response from the CNCF Landscape API");
                 return false;
             }
 
@@ -77,11 +87,10 @@ public class CncfDataRefreshService {
             // Parse and update data
             List<CncfProject> projects = parseLandscapeData(landscapeData);
             if (projects.isEmpty()) {
-                LOG.warn("No projects found in CNCF Landscape data");
+                recordError("No projects found in the CNCF Landscape data");
                 return false;
             }
 
-            
             // Update cached data
             cachedProjects.set(new ArrayList<>(projects));
             lastETag.set(newDataHash);
@@ -89,7 +98,6 @@ public class CncfDataRefreshService {
             lastError.set(null);
             lastErrorTime.set(null);
 
-            
             long duration = System.currentTimeMillis() - startTime;
             LOG.infof("CNCF data refresh completed in %dms: %d projects processed",
                      duration, projects.size());
@@ -98,15 +106,21 @@ public class CncfDataRefreshService {
 
         } catch (Exception e) {
             LOG.errorf(e, "Failed to refresh CNCF data: %s", e.getMessage());
-            lastError.set(e.getMessage());
-            lastErrorTime.set(Instant.now());
+            recordError(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             return false;
         }
     }
 
+    private void recordError(String message) {
+        LOG.warnf("CNCF data refresh failed: %s", message);
+        lastError.set(message);
+        lastErrorTime.set(Instant.now());
+    }
+
     /**
-     * Parses CNCF Landscape JSON data into CncfProject objects.
-     * Uses Jackson streaming parser for memory efficiency.
+     * Parses CNCF Landscape JSON data into CncfProject objects. A body that is not JSON at
+     * all is reported, not swallowed: the caller records it as the reason the refresh
+     * failed. Individual items that do not parse are skipped, as before.
      *
      * @param jsonData JSON data from CNCF Landscape
      * @return List of parsed CNCF projects
@@ -114,80 +128,85 @@ public class CncfDataRefreshService {
     private List<CncfProject> parseLandscapeData(String jsonData) {
         List<CncfProject> projects = new ArrayList<>();
 
+        JsonNode rootNode;
         try {
-            JsonNode rootNode = objectMapper.readTree(jsonData);
-            JsonNode itemsNode = rootNode.path("items");
+            rootNode = objectMapper.readTree(jsonData);
+        } catch (JsonProcessingException e) {
+            // getOriginalMessage() carries no source snippet, so nothing of the upstream
+            // body is quoted back; the tool clips and sanitizes the message anyway.
+            throw new IllegalStateException(
+                    "CNCF Landscape response is not valid JSON: " + e.getOriginalMessage(), e);
+        }
+        JsonNode itemsNode = rootNode.path("items");
+        JsonNode githubIndex = rootNode.path("github_data");
 
-            if (itemsNode.isArray()) {
-                for (JsonNode itemNode : itemsNode) {
-                    try {
-                        CncfProject project = parseProjectNode(itemNode);
-                        if (project != null) {
-                            projects.add(project);
-                        }
-                    } catch (Exception e) {
-                        LOG.debugf("Failed to parse project item: %s", e.getMessage());
+        if (itemsNode.isArray()) {
+            for (JsonNode itemNode : itemsNode) {
+                try {
+                    CncfProject project = parseProjectNode(itemNode, githubIndex);
+                    if (project != null) {
+                        projects.add(project);
                     }
+                } catch (Exception e) {
+                    LOG.debugf("Failed to parse project item: %s", e.getMessage());
                 }
             }
-
-            LOG.debugf("Parsed %d projects from CNCF Landscape data", projects.size());
-            return projects;
-
-        } catch (Exception e) {
-            LOG.errorf(e, "Failed to parse CNCF Landscape JSON data");
-            return new ArrayList<>();
         }
+
+        LOG.debugf("Parsed %d projects from CNCF Landscape data", projects.size());
+        return projects;
     }
 
     /**
      * Parses a single project node from the CNCF Landscape data.
      *
      * @param projectNode JSON node for a single project
+     * @param githubIndex top-level {@code github_data} map keyed by repository URL
      * @return Parsed CncfProject or null if invalid
      */
-    private CncfProject parseProjectNode(JsonNode projectNode) {
+    private CncfProject parseProjectNode(JsonNode projectNode, JsonNode githubIndex) {
         try {
-            // Extract basic project information
             String id = getNestedValue(projectNode, "id", "name");
             if (id == null) {
                 return null;
             }
 
             String name = getNestedValue(projectNode, "name");
-            String description = getNestedValue(projectNode, "description");
             String category = getNestedValue(projectNode, "category");
             String subcategory = getNestedValue(projectNode, "subcategory");
-            String homepage = getNestedValue(projectNode, "homepage_url");
-            String repoUrl = getNestedValue(projectNode, "repo_url");
-            String logo = getNestedValue(projectNode, "logo_url");
-            String crunchbaseUrl = getNestedValue(projectNode, "crunchbase_url");
-            String twitter = getNestedValue(projectNode, "twitter_url");
+            String homepage = getNestedValue(projectNode, "homepage_url", "website");
+            String repoUrl = primaryRepositoryUrl(projectNode);
+            JsonNode github = githubData(projectNode, repoUrl, githubIndex);
 
-            // Extract maturity level/landscape
-            String landscape = getNestedValue(projectNode, "landscape");
+            // The landscape's own description first; the repository's GitHub description
+            // is the fallback for members that publish none.
+            String description = getNestedValue(projectNode, "description");
+            if (description == null) {
+                description = getNestedValue(projectNode.path("summary"), "use_case");
+            }
+            if (description == null) {
+                description = getNestedValue(github, "description");
+            }
+
             String maturity = getNestedValue(projectNode, "maturity");
-            String oss = getNestedValue(projectNode, "oss");
-            String license = getNestedValue(projectNode, "license");
-            String acceptanceDate = getNestedValue(projectNode, "acceptance_date");
-            String graduationDate = getNestedValue(projectNode, "graduation_date");
-            String latestVersion = getNestedValue(projectNode, "latest_version");
+            String license = getNestedValue(github, "license");
+            if (license == null) {
+                license = getNestedValue(projectNode, "license");
+            }
+            String acceptanceDate = getNestedValue(projectNode, "accepted_at", "acceptance_date");
+            String graduationDate = getNestedValue(projectNode, "graduated_at", "graduation_date");
+            String latestVersion = latestVersion(projectNode, github);
             String org = getNestedValue(projectNode, "organization");
             String endUserSupport = getNestedValue(projectNode, "enduser_support");
 
-            // Extract tags
             List<String> tags = extractTags(projectNode);
 
-            // Extract GitHub metadata
-            Integer stars = extractGithubStars(projectNode);
-            Integer forks = extractGithubForks(projectNode);
-            Integer contributors = extractGithubContributors(projectNode);
-            String contributorsStr = contributors != null ? String.valueOf(contributors) : "";
-            java.util.Date lastCommitDate = extractLastCommitDate(projectNode);
-            java.util.Date firstCommitDate = extractFirstCommitDate(projectNode);
+            int stars = github.path("stars").asInt(0);
+            int forks = github.path("forks").asInt(0);
+            int contributors = extractContributors(github);
+            Instant lastCommitDate = extractTimestamp(github, "latest_commit", "last_commit_at");
 
-            // Create project metadata
-            var metadata = new io.mcp.cncf.model.CncfModel.ProjectMetadata(
+            var metadata = new ProjectMetadata(
                 "", // creationDate
                 acceptanceDate != null ? acceptanceDate : "",
                 graduationDate,
@@ -196,19 +215,19 @@ public class CncfDataRefreshService {
                 org,
                 tags, // maintainers
                 tags, // companies
-                stars != null ? stars : 0.0,
-                forks != null ? forks : 0.0,
-                contributorsStr,
+                stars,
+                forks,
+                String.valueOf(contributors),
                 "", // openIssues
                 "", // crdbBacked
                 endUserSupport != null ? endUserSupport : "",
                 repoUrl != null ? repoUrl : "",
                 homepage != null ? homepage : "",
-                null, // lastCommitDate
-                contributors != null ? contributors : 0
+                lastCommitDate,
+                contributors
             );
 
-            return new io.mcp.cncf.model.CncfModel.CncfProject(
+            return new CncfProject(
                 id,
                 name != null ? name : "",
                 category != null ? category : "",
@@ -227,6 +246,74 @@ public class CncfDataRefreshService {
         }
     }
 
+    /** The primary entry of {@code repositories}, else its first, else the legacy {@code repo_url}. */
+    private String primaryRepositoryUrl(JsonNode projectNode) {
+        JsonNode repositories = projectNode.path("repositories");
+        if (repositories.isArray() && !repositories.isEmpty()) {
+            for (JsonNode repo : repositories) {
+                if (repo.path("primary").asBoolean(false)) {
+                    String url = getNestedValue(repo, "url");
+                    if (url != null) {
+                        return url;
+                    }
+                }
+            }
+            String first = getNestedValue(repositories.get(0), "url");
+            if (first != null) {
+                return first;
+            }
+        }
+        return getNestedValue(projectNode, "repo_url");
+    }
+
+    /** GitHub metrics for the project: the top-level index by repository URL, else the legacy nested node. */
+    private JsonNode githubData(JsonNode projectNode, String repoUrl, JsonNode githubIndex) {
+        if (repoUrl != null && githubIndex.isObject()) {
+            JsonNode indexed = githubIndex.path(repoUrl);
+            if (!indexed.isMissingNode()) {
+                return indexed;
+            }
+        }
+        return projectNode.path("github_data");
+    }
+
+    /** A flat {@code latest_version} if present, else the tag at the end of {@code latest_release.url}. */
+    private String latestVersion(JsonNode projectNode, JsonNode github) {
+        String flat = getNestedValue(projectNode, "latest_version");
+        if (flat != null) {
+            return flat;
+        }
+        String releaseUrl = getNestedValue(github.path("latest_release"), "url");
+        if (releaseUrl == null) {
+            return null;
+        }
+        int slash = releaseUrl.lastIndexOf('/');
+        return slash >= 0 && slash < releaseUrl.length() - 1 ? releaseUrl.substring(slash + 1) : null;
+    }
+
+    /** {@code contributors.count} in the current layout, a bare number in the old one. */
+    private int extractContributors(JsonNode github) {
+        JsonNode contributors = github.path("contributors");
+        if (contributors.isObject()) {
+            return contributors.path("count").asInt(0);
+        }
+        return contributors.asInt(0);
+    }
+
+    /** An ISO-8601 timestamp at {@code <objectField>.ts} (current layout) or {@code <flatField>} (old). */
+    private Instant extractTimestamp(JsonNode github, String objectField, String flatField) {
+        try {
+            String ts = getNestedValue(github.path(objectField), "ts");
+            if (ts == null) {
+                ts = getNestedValue(github, flatField);
+            }
+            return ts == null ? null : Instant.parse(ts);
+        } catch (Exception e) {
+            LOG.debugf("Error parsing %s timestamp: %s", objectField, e.getMessage());
+            return null;
+        }
+    }
+
     /**
      * Extracts nested value from JSON node.
      *
@@ -237,7 +324,7 @@ public class CncfDataRefreshService {
     private String getNestedValue(JsonNode node, String... paths) {
         for (String path : paths) {
             JsonNode valueNode = node.path(path);
-            if (!valueNode.isMissingNode() && !valueNode.isNull()) {
+            if (!valueNode.isMissingNode() && !valueNode.isNull() && valueNode.isValueNode()) {
                 String value = valueNode.asText();
                 if (!value.trim().isEmpty()) {
                     return value;
@@ -286,115 +373,6 @@ public class CncfDataRefreshService {
         }
 
         return tags;
-    }
-
-    /**
-     * Extracts GitHub stars from project node.
-     *
-     * @param projectNode Project JSON node
-     * @return Number of stars or 0
-     */
-    private Integer extractGithubStars(JsonNode projectNode) {
-        try {
-            JsonNode githubData = projectNode.path("github_data");
-            if (!githubData.isMissingNode()) {
-                JsonNode starsNode = githubData.path("stars");
-                if (!starsNode.isMissingNode()) {
-                    return starsNode.asInt();
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugf("Error extracting GitHub stars: %s", e.getMessage());
-        }
-        return 0;
-    }
-
-    /**
-     * Extracts GitHub forks from project node.
-     *
-     * @param projectNode Project JSON node
-     * @return Number of forks or 0
-     */
-    private Integer extractGithubForks(JsonNode projectNode) {
-        try {
-            JsonNode githubData = projectNode.path("github_data");
-            if (!githubData.isMissingNode()) {
-                JsonNode forksNode = githubData.path("forks");
-                if (!forksNode.isMissingNode()) {
-                    return forksNode.asInt();
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugf("Error extracting GitHub forks: %s", e.getMessage());
-        }
-        return 0;
-    }
-
-    /**
-     * Extracts GitHub contributors from project node.
-     *
-     * @param projectNode Project JSON node
-     * @return Number of contributors or 0
-     */
-    private Integer extractGithubContributors(JsonNode projectNode) {
-        try {
-            JsonNode githubData = projectNode.path("github_data");
-            if (!githubData.isMissingNode()) {
-                JsonNode contributorsNode = githubData.path("contributors");
-                if (!contributorsNode.isMissingNode()) {
-                    return contributorsNode.asInt();
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugf("Error extracting GitHub contributors: %s", e.getMessage());
-        }
-        return 0;
-    }
-
-    /**
-     * Extracts last commit date from project node.
-     *
-     * @param projectNode Project JSON node
-     * @return Last commit date or null
-     */
-    private java.util.Date extractLastCommitDate(JsonNode projectNode) {
-        try {
-            JsonNode githubData = projectNode.path("github_data");
-            if (!githubData.isMissingNode()) {
-                JsonNode lastCommitNode = githubData.path("last_commit_at");
-                if (!lastCommitNode.isMissingNode() && !lastCommitNode.isNull()) {
-                    // Parse ISO 8601 date
-                    String dateStr = lastCommitNode.asText();
-                    return java.util.Date.from(Instant.parse(dateStr));
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugf("Error extracting last commit date: %s", e.getMessage());
-        }
-        return null;
-    }
-
-    /**
-     * Extracts first commit date from project node.
-     *
-     * @param projectNode Project JSON node
-     * @return First commit date or null
-     */
-    private java.util.Date extractFirstCommitDate(JsonNode projectNode) {
-        try {
-            JsonNode githubData = projectNode.path("github_data");
-            if (!githubData.isMissingNode()) {
-                JsonNode firstCommitNode = githubData.path("first_commit_at");
-                if (!firstCommitNode.isMissingNode() && !firstCommitNode.isNull()) {
-                    // Parse ISO 8601 date
-                    String dateStr = firstCommitNode.asText();
-                    return java.util.Date.from(Instant.parse(dateStr));
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugf("Error extracting first commit date: %s", e.getMessage());
-        }
-        return null;
     }
 
     /**
@@ -473,7 +451,6 @@ public class CncfDataRefreshService {
         return stats;
     }
 
-    
     /**
      * Async refresh using Java 25 virtual threads.
      * Simple and efficient for concurrent operations.
