@@ -13,9 +13,11 @@
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
         <!-- 3.33.x is the current LTS line; 3.33.3.1 carried the security fixes for
-             CVE-2026-39852 (quarkus-vertx-http authorization bypass) and 3.33.3.2 is the
-             current patch of that line. Same version as mcp-redhat-kb. -->
-        <quarkus.platform.version>3.33.3.2</quarkus.platform.version>
+             CVE-2026-39852 (quarkus-vertx-http authorization bypass) and 3.33.3.3 is the
+             current patch of that line: an LTS emergency release (2026-09-22) closing ~30
+             transitive CVEs, most relevant here the Netty codec-http fixes for HTTP request
+             smuggling / DoS on the /mcp endpoint. Same version as mcp-redhat-kb. -->
+        <quarkus.platform.version>3.33.3.3</quarkus.platform.version>
         <!-- 2.0.x implements MCP specification 2026-07-28 (stateless core,
              server/discover) and is built against Quarkus 3.33.3.x, the platform line
              pinned above. 2.0.1 (2026-09-11) is a bug-fix release on the same line: scoped
