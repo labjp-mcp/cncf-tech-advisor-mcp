@@ -19,7 +19,7 @@
 ####
 FROM quay.io/quarkus/ubi9-quarkus-micro-image:2.0
 
-LABEL io.modelcontextprotocol.server.name="io.github.jeanlopezxyz/cncf-tech-advisor-mcp"
+LABEL io.modelcontextprotocol.server.name="io.github.labjp-mcp/cncf-tech-advisor-mcp"
 LABEL io.k8s.display-name="CNCF Tech Advisor MCP Server (native, micro)"
 LABEL io.openshift.tags="mcp,cncf,kubernetes,landscape,technology-advisor,quarkus,native"
 LABEL maintainer="Jean Lopez"

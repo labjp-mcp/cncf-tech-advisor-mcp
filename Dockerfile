@@ -46,7 +46,7 @@ RUN ./mvnw package -B ${MAVEN_BUILD_ARGS}
 # Stage 2: Runtime
 FROM registry.access.redhat.com/ubi9/openjdk-25:1.24
 
-LABEL io.modelcontextprotocol.server.name="io.github.jeanlopezxyz/cncf-tech-advisor-mcp"
+LABEL io.modelcontextprotocol.server.name="io.github.labjp-mcp/cncf-tech-advisor-mcp"
 LABEL io.k8s.display-name="CNCF Tech Advisor MCP Server"
 LABEL io.openshift.tags="mcp,cncf,kubernetes,landscape,technology-advisor,quarkus"
 LABEL maintainer="Jean Lopez"

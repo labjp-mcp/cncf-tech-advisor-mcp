@@ -47,8 +47,8 @@ docker-native: ## Build the native images (needs a Linux target/*-runner: make n
 	docker build -f src/main/docker/Dockerfile.native-micro -t cncf-tech-advisor-mcp:native-micro .
 
 docker-push: docker ## Push Docker image to registry
-	docker tag cncf-tech-advisor-mcp:latest ghcr.io/jeanlopezxyz/cncf-tech-advisor-mcp:latest
-	docker push ghcr.io/jeanlopezxyz/cncf-tech-advisor-mcp:latest
+	docker tag cncf-tech-advisor-mcp:latest ghcr.io/labjp-mcp/cncf-tech-advisor-mcp:latest
+	docker push ghcr.io/labjp-mcp/cncf-tech-advisor-mcp:latest
 
 # Clean targets
 clean: ## Clean build artifacts
