@@ -40,6 +40,15 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- Ahead of the Quarkus BOM so it wins: Quarkus 3.33.3.3 ships jackson-databind
+                 2.21.6 (CVE-2026-91776, CVE-2026-91777). Drop once the platform carries 2.21.7+. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>2.21.7</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>${quarkus.platform.group-id}</groupId>
                 <artifactId>${quarkus.platform.artifact-id}</artifactId>
