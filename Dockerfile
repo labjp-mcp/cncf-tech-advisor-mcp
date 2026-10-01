@@ -37,8 +37,11 @@ RUN ./mvnw dependency:go-offline -B
 # Copy source code
 COPY --chown=185 src src
 
-# Build the application, running the tests as a gate.
-RUN ./mvnw package -B
+# Build the application, running the tests as a gate. CI passes -DskipTests: its test job
+# has already run them on three platforms, and under arm64 emulation the timing-sensitive
+# HTTP tests time out without telling anything about the code.
+ARG MAVEN_BUILD_ARGS=""
+RUN ./mvnw package -B ${MAVEN_BUILD_ARGS}
 
 # Stage 2: Runtime
 FROM registry.access.redhat.com/ubi9/openjdk-25:1.24
