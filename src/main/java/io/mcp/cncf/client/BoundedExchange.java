@@ -17,6 +17,7 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * One HTTP exchange bounded in <em>both</em> dimensions an upstream can abuse: the whole of
@@ -71,10 +72,14 @@ final class BoundedExchange {
         // Cancelling the body subscription aborts the exchange, and HttpClient may then fail
         // the response with its own "subscription cancelled" IOException before it looks at
         // what the subscriber decided. The refusal is therefore recorded on the side, so it
-        // is reported as the size refusal it is and not as a network failure.
+        // is reported as the size refusal it is and not as a network failure. The same race
+        // hits statuses whose body is never read (a 304 has none): the status is kept here so
+        // it survives a cancelled exchange on every platform.
         AtomicBoolean refusedAsTooLarge = new AtomicBoolean();
+        AtomicReference<Outcome> unreadStatus = new AtomicReference<>();
         CompletableFuture<HttpResponse<byte[]>> pending = client.sendAsync(request, info -> {
             if (!readBodyFor.contains(info.statusCode())) {
+                unreadStatus.set(new Outcome(info.statusCode(), info.headers(), new byte[0]));
                 return new RefusingSubscriber(CompletableFuture.completedFuture(new byte[0]));
             }
             long declared = info.headers().firstValueAsLong("Content-Length").orElse(-1);
@@ -94,6 +99,9 @@ final class BoundedExchange {
         } catch (ExecutionException e) {
             if (refusedAsTooLarge.get()) {
                 throw new ResponseTooLargeException();
+            }
+            if (unreadStatus.get() != null) {
+                return unreadStatus.get();
             }
             throw unwrap(e);
         }
