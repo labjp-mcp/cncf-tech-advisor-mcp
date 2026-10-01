@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - `ErrorHandler`, `CncfLandscapeClient` (REST client interface), unused model helpers.
+- npm publishing from `release.yml` and `build.yml` (the wrapper was stale and advertised
+  tools that no longer exist), the mislabelled `macos-x64` native asset (built on an arm64
+  runner) and `SETUP_NPM.md`. A release is now the GitHub Release (uber-jar, native Linux
+  x64 and macOS arm64) plus the image `ghcr.io/labjp-mcp/cncf-tech-advisor-mcp`.
 
 ## [1.0.0] — 2025-12-16 (initial release, as originally described)
 

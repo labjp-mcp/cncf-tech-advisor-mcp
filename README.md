@@ -24,7 +24,11 @@ The same sanitized record feeds the text and the `structuredContent` channel.
 
 ## Run
 
+Requires Java 25 (only the build and the JVM run; the native executable needs no Java).
+
 ```bash
+git clone https://github.com/labjp-mcp/cncf-tech-advisor-mcp.git
+cd cncf-tech-advisor-mcp
 ./mvnw package -DskipTests
 java -jar target/quarkus-app/quarkus-run.jar            # stdio (default): for Claude Desktop, Claude Code, ...
 ```
@@ -53,6 +57,12 @@ Containers: `docker build -t cncf-tech-advisor-mcp .` (JVM, builds inside the im
 `docker run --rm -p 127.0.0.1:8080:8080 cncf-tech-advisor-mcp` and put a network boundary
 in front — the server has no authentication of its own.
 
+Releases: a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which attaches a
+self-contained `cncf-tech-advisor-mcp.jar` (`java -jar`, stdio) and native executables for
+Linux x64 and macOS arm64 to the GitHub Release, and pushes the JVM image to
+`ghcr.io/labjp-mcp/cncf-tech-advisor-mcp:X.Y.Z`. Assets of releases older than this
+workflow (v1.0.0) were built for the former npm wrapper. There is no npm package to install.
+
 ## Configuration
 
 All in `src/main/resources/application.properties`; override with `-D` or environment.
@@ -76,7 +86,7 @@ gzip-encoded (≈0.85 MB instead of 3.8 MB). A sequence of tool calls costs one 
 ## Develop
 
 ```bash
-./mvnw clean verify          # 169 tests; a WireMock stands in for the landscape, nothing reaches cncf.io
+./mvnw clean verify          # 172 tests; a WireMock stands in for the landscape, nothing reaches cncf.io
 ./mvnw quarkus:dev           # HTTP on, INFO logs
 make help
 ```

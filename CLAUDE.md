@@ -60,7 +60,7 @@ carrying a per-response nonce; the server's own text stays outside it.
 ## Commands
 
 ```bash
-./mvnw clean verify                      # 169 tests; WireMock stands in for the landscape
+./mvnw clean verify                      # 172 tests; WireMock stands in for the landscape
 ./mvnw package -DskipTests               # target/quarkus-app/quarkus-run.jar (fast-jar)
 ./mvnw package -Pnative -DskipTests      # + target/*-runner (needs GraalVM/Mandrel 25)
 scripts/mcp-native-parity.sh             # tools/list and tools/call identical on JVM and native
