@@ -1,74 +1,49 @@
-# =============================================================================
-# Dockerignore - Files to exclude from Docker context
-# =============================================================================
-
-# Git and Version Control
+# Ignore git
 .git
 .gitignore
 .gitattributes
 
-# Maven build artifacts (will be built in container)
-target/
-.mvn/wrapper/
-
-# IDE and Editor files
-.idea/
-.vscode/
+# Ignore IDE files
+.idea
+*.iml
+.vscode
+.project
+.classpath
+.settings
 *.swp
 *.swo
 *~
 
-# OS and System files
+# OS files
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Logs and temporary files
-*.log
-*.tmp
-temp/
-logs/
+# Ignore build artifacts: the JVM image builds inside the container. The one exception is
+# the native executable, which src/main/docker/Dockerfile.native* package from the host
+# build (a compile inside the image would need the Mandrel builder as a build stage).
+target/*
+!target/*-runner
 
-# Node.js (for npm packaging only)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Ignore npm packaging and the Node side (not needed for either image)
+npm
+node_modules
+bin
+package.json
+*.js
 
-# Documentation (will be copied separately)
+# Ignore docs, scripts and CI
 *.md
-!README.md
-
-# Scripts and configuration (will be copied selectively)
-scripts/
-!docker/scripts/
+docs
+LICENSE
+scripts
 Makefile
-
-# CI/CD
-.github/
+.github
 .gitlab-ci.yml
-.travis.yml
-circle.yml
 
 # Local development files
 .env.local
 .env.development
 .env.test
-
-# Cache directories
-.cache/
-*.cache
-
-# Backup files
-*.bak
-*.backup
-
-# Archive files
-*.zip
-*.tar.gz
-*.rar
-
-# Test files
-*.test
-tests/
-test-results/
+*.log
+*.tmp

@@ -1,161 +1,116 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository. Keep it true: every claim here
+was verified on 2026-09-20 (see `SECURITY-PENTEST.md` for the evidence).
 
-## Project Overview
+## What this is
 
-CNCF Tech Advisor MCP Server is a Model Context Protocol (MCP) server that provides intelligent technology recommendations and analysis for cloud-native architectures. It integrates with the CNCF Landscape API to offer real-time insights on 2,398+ CNCF projects.
+A Model Context Protocol server, in Java 25 / Quarkus 3.33 LTS (`quarkus-mcp-server`
+2.0.1, MCP specification 2026-07-28), that serves the public CNCF Landscape
+(`https://landscape.cncf.io/data/full.json`, 2,426 items) to a language model through four
+read-only tools. No authentication, no credentials, no database: one in-memory catalogue
+refreshed at most once per `cache-ttl`.
+
+Sibling project and reference standard: `../mcp-redhat-kb` (same Quarkus line, same
+sanitizer/fence design, same test tooling). When in doubt about a convention, look there.
 
 ## Architecture
 
-Hybrid Java/Node.js architecture:
-- **Core Backend**: Quarkus-based Java application using Java 25 preview features
-- **NPM Package**: Node.js wrapper for distribution
-- **MCP Server**: Implements Model Context Protocol for AI integration
-- **Multi-transport**: Supports both STDIO and HTTP/SSE transports
-
-Key directories:
-- `src/main/java/io/mcp/cncf/` - Core Java application
-  - `client/` - CNCF API integration (CncfLandscapeClient)
-  - `model/` - Data models and search logic (CncfModel)
-  - `tool/` - MCP tool implementations (CncfTool)
-  - `service/` - Business logic services
-  - `config/` - Configuration constants
-  - `util/` - Utility classes
-- `bin/` - Entry point scripts
-- `npm/` - NPM package distribution files
-- `test/` - Integration tests
-
-## Common Development Commands
-
-### Development
-```bash
-# Run in development mode with hot reload
-./mvnw quarkus:dev
-make dev
-
-# Run tests
-./mvnw test
-make test
-
-# Run tests with coverage
-./mvnw verify jacoco:report
-make test-coverage
+```
+src/main/java/io/mcp/cncf/
+  client/   LandscapeHttp (java.net.http + BoundedExchange: whole-exchange deadline,
+            byte cap while streaming, bounded gunzip, ETag/If-None-Match), LandscapeConfig
+            (@ConfigMapping cncf.landscape.*), LandscapeSource (interface the tests fake)
+  service/  CncfDataRefreshService: the cache. TTL, single-flight lock, failure backoff,
+            forced-refresh interval, parse of full.json (current and legacy layout)
+  model/    CncfModel records (CncfProject, ProjectMetadata, SearchQuery, SearchResult)
+  tool/     CncfTool (the 4 @Tool methods; every call goes through guarded()),
+            CncfFormatter (renders inside UntrustedFence, both channels from one sanitized
+            record), ContentSanitizer, UntrustedFence, RateLimiter, ToolAuditLog, ToolErrors
+  tool/model/  the @OutputSchema records (must carry @RegisterForReflection)
+  config/   SearchConstants (caps and limits)
+src/main/resources/application.properties   the only configuration file
+src/main/docker/Dockerfile.native*          native images (JVM image: ./Dockerfile)
+scripts/mcp-native-parity.sh                 diff tools/list AND two tools/call between JVM and native
 ```
 
-### Building
+There is no MicroProfile REST client and no JAX-RS endpoint any more; do not add
+`quarkus-rest*` back without a reason. Do not introduce Caffeine for the rate limiter: it
+picks its cache node class by name at runtime and the native image fails every tool call
+with `ClassNotFoundException` while `tools/list` looks perfect (`quarkus-cache` registers
+only the node classes its own configured caches need; the pentest hit both variants).
+`RateLimiter` uses a capped `ConcurrentHashMap` instead. The `npm/`, `bin/`, `test/*.js`, `docker/`,
+`install-claude-desktop.*` and `scripts/{build-npm,cross-build,deploy}.sh` files predate the
+homologation and are not maintained by the build; treat them as legacy.
+
+## Tools
+
+| tool | annotations | note |
+|---|---|---|
+| `search_cncf(query?, category?, limit?)` | read-only, idempotent | keyword ≤200 chars, ≥2; limit clamped 1..100 |
+| `get_cncf_project(projectName)` | read-only, idempotent | exact name, case-insensitive, ≤120 chars |
+| `list_cncf_categories()` | read-only, idempotent | |
+| `refresh_cncf_data()` | not read-only, idempotent | `updated` / `unchanged` / `throttled`; conditional GET |
+
+Every tool: rate limiter first (`mcp.rate-limit.calls-per-minute`, per remote address, 120,
+`0` disables), audit line last (`io.mcp.cncf.audit`), any escaping exception → one fixed
+sentence, detail in the log. Every upstream value is sanitized and rendered inside a fence
+carrying a per-response nonce; the server's own text stays outside it.
+
+## Commands
+
 ```bash
-# Build JAR package
-./mvnw clean package -DskipTests
-make build
-
-# Build native executable (requires GraalVM)
-./mvnw clean package -Dnative -DskipTests
-make native
-
-# Quick start (build + run)
-make quick-start
+./mvnw clean verify                      # 172 tests; WireMock stands in for the landscape
+./mvnw package -DskipTests               # target/quarkus-app/quarkus-run.jar (fast-jar)
+./mvnw package -Pnative -DskipTests      # + target/*-runner (needs GraalVM/Mandrel 25)
+scripts/mcp-native-parity.sh             # tools/list and tools/call identical on JVM and native
+make run-stdio | make run | make native | make docker
+./mvnw versions:display-dependency-updates versions:display-plugin-updates
 ```
 
-### Running the Application
-```bash
-# Run built JAR
-java -jar target/cncf-tech-advisor-mcp-1.0.0-runner.jar
-make run
+Run on stdio (shipped default; HTTP off): `java -jar target/quarkus-app/quarkus-run.jar`.
+Run on HTTP: add `-Dquarkus.http.host-enabled=true -Dquarkus.mcp.server.stdio.enabled=false`;
+the endpoint is `http://127.0.0.1:8080/mcp` (loopback by default; `QUARKUS_HTTP_HOST=0.0.0.0`
+publishes it — the container images do that).
 
-# Run with STDIO transport (for MCP clients)
-java -jar target/cncf-tech-advisor-mcp-1.0.0-runner.jar -Dquarkus.mcp.server.stdio.enabled=true
-make run-stdio
+There is no `--port` flag, no `sse` profile activation, no Spotless, no JaCoCo, no
+`*-runner.jar`. Logging is INFO on stderr (`quarkus.log.console.stderr=true`); stdout is the
+protocol on stdio and stays clean.
 
-# Run with HTTP transport (for testing/development)
-java -jar target/cncf-tech-advisor-mcp-1.0.0-runner.jar --port 8080
+## Configuration (all in application.properties, override with -D or env)
+
+```
+cncf.landscape.base-url=https://landscape.cncf.io   # /data/full.json is fixed in code
+cncf.landscape.connect-timeout=PT15S
+cncf.landscape.request-timeout=PT60S                 # whole exchange, body included
+cncf.landscape.max-bytes=16777216                     # compressed and inflated
+cncf.landscape.cache-ttl=PT1H          (CNCF_CACHE_TTL)
+cncf.landscape.failure-backoff=PT30S
+cncf.landscape.min-force-interval=PT30S
+mcp.rate-limit.calls-per-minute=120    (MCP_RATE_LIMIT)
+quarkus.http.cors.origins=...          (MCP_ALLOWED_ORIGINS, default http://localhost:6274, never *)
 ```
 
-### NPM Package Management
-```bash
-# Build NPM package
-npm run build
-npm run postinstall  # builds Maven package silently
+## Testing conventions
 
-# Run NPM package
-npm start
-npm run dev
+- `LandscapeStubProfile`: WireMock at the site root, TTL/backoff/force-interval `0`, rate
+  limit `0`, so every call reaches the stub. `CachingLandscapeProfile`: shipped defaults,
+  limit 6 — for the cache and limiter over the wire (`CncfCachingProtocolTest`).
+- `CncfDataRefreshServiceCacheTest` is pure (fake clock, counting source): each test states
+  how many downloads a sequence may cost.
+- Protocol tests run once per `Era` (stateful 2025-06-18 session and stateless 2026-07-28).
+- `%test.cncf.landscape.base-url=http://127.0.0.1:1`: a test that forgets the profile fails
+  on connection instead of passing on live data. No test may reach landscape.cncf.io.
+- Adding an `@OutputSchema` record: annotate it `@RegisterForReflection` (nested records
+  too) or the native image publishes `{"type":"object"}` silently; the parity script and
+  `publishesNonEmptyOutputSchemas` catch it.
 
-# Publish to NPM
-npm run release
-```
+## Rules
 
-### Docker Operations
-```bash
-# Build Docker image
-docker build -t cncf-tech-advisor-mcp .
-make docker
-
-# Run Docker container
-docker run -i --rm -p 8080:8080 cncf-tech-advisor-mcp:latest
-make docker-run
-
-# Build and push to registry
-make docker-push
-```
-
-### Code Quality
-```bash
-# Format code
-./mvnw spotless:apply
-make format
-
-# Check code style
-./mvnw spotless:check
-make lint
-```
-
-## Configuration
-
-### Environment Variables
-- `JAVA_OPTS` - JVM options (e.g., "-Xmx1g -Xms512m")
-- `STDIO_ENABLED` - Enable stdio transport
-- `HTTP_ENABLED` - Enable HTTP transport
-- `QUARKUS_HTTP_PORT` - HTTP server port (default: 8080)
-- `QUARKUS_LOG_LEVEL` - Log level (DEBUG, INFO, WARN, ERROR)
-
-### Application Profiles
-- Default: STDIO transport enabled, HTTP disabled
-- `sse` profile: HTTP/SSE enabled, STDIO disabled (activate with --port)
-- `dev` profile: Development settings with relaxed logging
-- `prod` profile: Production optimized settings
-
-## MCP Tools Available
-
-The server implements these MCP tools:
-- `search_cncf` - Search projects by keyword/category
-- `get_cncf_project` - Detailed project information
-- `list_cncf_categories` - List all available categories
-- `refresh_cncf_data` - Refresh data from CNCF API
-
-## Key Implementation Files
-
-1. `CncfTool.java` - Main MCP tool implementation with @McpTool annotations
-2. `CncfModel.java` - Data models including Project record and search logic
-3. `CncfLandscapeClient.java` - REST client for CNCF Landscape API integration
-4. `bin/cncf-tech-advisor` - Main entry point script that handles JVM options and profiles
-5. `application.properties` - Quarkus configuration with MCP server settings
-
-## Development Workflow
-
-1. Local development uses `./mvnw quarkus:dev` for hot reload
-2. Tests are written with JUnit 5 and can be run with `./mvnw test`
-3. The project uses Java 25 preview features (ensure JDK 25+ is installed)
-4. Native builds require GraalVM for optimal performance
-5. NPM package automatically builds Java component during postinstall
-
-## Testing
-
-Unit tests in `src/test/java/` verify MCP tool functionality and API integration. Integration tests validate the MCP protocol implementation. Test coverage reports can be generated with JaCoCo.
-
-## Build System
-
-- **Maven**: Primary build tool with Quarkus plugin
-- **Makefile**: Convenient shortcuts for common operations
-- **NPM**: Wrapper for distribution and publishing
-- **GitHub Actions**: CI/CD pipeline for automated builds and releases
+- Anything from upstream is rendered through `CncfFormatter` only. No new tool may return
+  a raw upstream string, in either channel.
+- Messages that reach the model are this server's own sentences. Never concatenate
+  `e.getMessage()` into a `ToolResponse`.
+- Quarkus stays on the 3.33 LTS line; `quarkus-mcp-server` on 2.0.x; jsonschema-generator
+  on the line the extension is built against (check its parent pom before bumping).
+- Commits in English, conventional style, no Co-Authored-By trailers.

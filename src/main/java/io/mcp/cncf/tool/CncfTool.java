@@ -1,241 +1,293 @@
 package io.mcp.cncf.tool;
 
-import io.mcp.cncf.client.CncfLandscapeClient;
 import io.mcp.cncf.config.SearchConstants;
-import io.mcp.cncf.model.CncfModel.*;
+import io.mcp.cncf.model.CncfModel.CncfProject;
+import io.mcp.cncf.model.CncfModel.SearchQuery;
+import io.mcp.cncf.model.CncfModel.SearchResult;
 import io.mcp.cncf.service.CncfDataRefreshService;
-import io.mcp.cncf.util.ErrorHandler;
+import io.mcp.cncf.service.CncfDataRefreshService.Outcome;
+import io.mcp.cncf.tool.model.CncfCategoryList;
+import io.mcp.cncf.tool.model.CncfProjectDetail;
+import io.mcp.cncf.tool.model.CncfRefreshStatus;
+import io.mcp.cncf.tool.model.CncfSearchResult;
+import io.quarkiverse.mcp.server.MetaKey;
 import io.quarkiverse.mcp.server.TextContent;
 import io.quarkiverse.mcp.server.Tool;
+import io.quarkiverse.mcp.server.ToolArg;
 import io.quarkiverse.mcp.server.ToolResponse;
+import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.rest.client.inject.RestClient;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
+
+import static io.mcp.cncf.config.SearchConstants.MAX_NAME_CHARS;
+import static io.mcp.cncf.config.SearchConstants.MAX_QUERY_LENGTH;
+import static io.mcp.cncf.config.SearchConstants.MAX_SEARCH_RESULTS;
+import static io.mcp.cncf.config.SearchConstants.MIN_SEARCH_RESULTS;
 
 /**
- * Simple CNCF Tech Advisor MCP Tool.
- * Provides essential CNCF project search functionality.
- * Clean, focused, production-ready.
+ * MCP tools over the CNCF Landscape.
+ *
+ * <p>Every value the landscape publishes is third-party content (the landscape is a public
+ * repository that accepts pull requests), so no tool renders it directly: everything goes
+ * through {@link CncfFormatter}, which sanitizes each field and fences upstream text apart
+ * from the server's own. The same cleaned record feeds both the text and the
+ * {@code structuredContent} channel.
+ *
+ * <p>Every call passes the {@link RateLimiter} first and is written to the
+ * {@link ToolAuditLog} last. The three read tools are {@link Blocking}: when the catalogue is
+ * due they trigger a synchronous download, so they must run on a worker thread rather than
+ * on the event loop. Most calls never download -- see {@link CncfDataRefreshService}.
+ *
+ * <p>The Jakarta constraints on the arguments are not enforced by a validator -- there is
+ * none on the classpath. They exist for the schema generator, which turns them into
+ * {@code maxLength}, {@code minimum} and {@code maximum} in the published
+ * {@code inputSchema}; each states a limit the code below already applies by clamping.
  */
 @ApplicationScoped
 public class CncfTool {
 
-    @RestClient
-    @Inject
-    CncfLandscapeClient client;
-
-    
     @Inject
     CncfDataRefreshService refreshService;
 
-    /**
-     * Search CNCF projects by keyword or category.
-     */
-    @Tool(name = "search_cncf", description = "Search CNCF projects by keyword or category")
-    public ToolResponse searchCncfProjects(String query, String category, Integer limit) {
-        try {
-            // Ensure data is fresh
-            refreshService.refreshData();
+    @Inject
+    RateLimiter rateLimiter;
 
-            // Get current projects
-            List<CncfProject> projects = refreshService.getCurrentProjects();
-            if (projects.isEmpty()) {
-                return ToolResponse.error("No CNCF projects available. Please try again later.");
+    @Inject
+    ToolAuditLog audit;
+
+    @Tool(
+            name = "search_cncf",
+            title = "Search CNCF Landscape projects",
+            description = """
+                    Search the CNCF Landscape (cloud native projects and products) by keyword \
+                    and/or category. The keyword is matched case-insensitively against project \
+                    name, description, category and tags; popular and graduated projects rank \
+                    higher. Returns a compact list with name, category, maturity, stars and a \
+                    short description - call get_cncf_project with a name for the full detail. \
+                    Category names must match the landscape exactly; get them from \
+                    list_cncf_categories. With neither keyword nor category the most popular \
+                    projects are returned.""",
+            annotations = @Tool.Annotations(
+                    readOnlyHint = true,
+                    destructiveHint = false,
+                    idempotentHint = true,
+                    openWorldHint = true),
+            outputSchema = @Tool.OutputSchema(from = CncfSearchResult.class))
+    @Blocking
+    public ToolResponse searchCncfProjects(
+            @ToolArg(description = "Keyword to match against name, description, category and tags, "
+                    + "e.g. 'service mesh' or 'kubernetes'. At least 2 characters when given.",
+                    defaultValue = "", required = false)
+            @Size(max = MAX_QUERY_LENGTH) String query,
+            @ToolArg(description = "Exact landscape category name to filter by, e.g. "
+                    + "'Orchestration & Management'; see list_cncf_categories",
+                    defaultValue = "", required = false)
+            @Size(max = MAX_QUERY_LENGTH) String category,
+            @ToolArg(description = "Max results, 1-100", defaultValue = "10", required = false)
+            @Min(MIN_SEARCH_RESULTS) @Max(MAX_SEARCH_RESULTS) Integer limit) {
+        return guarded("search_cncf", query == null || query.isBlank() ? category : query, () -> {
+            String keyword = normalize(query);
+            String categoryFilter = normalize(category);
+            SearchQuery searchQuery;
+            try {
+                searchQuery = new SearchQuery(
+                        keyword.isEmpty() ? null : keyword,
+                        categoryFilter.isEmpty() ? null : categoryFilter,
+                        null, // tag filter
+                        null, // maturity filter
+                        clampLimit(limit));
+            } catch (IllegalArgumentException e) {
+                // The record's own messages: this server's text, safe to relay.
+                return ToolResponse.error("Invalid request: " + e.getMessage());
             }
 
-            // Create search query
-            SearchQuery searchQuery = new SearchQuery(
-                query != null && !query.trim().isEmpty() ? query : null,
-                category != null && !category.trim().isEmpty() ? category : null,
-                null, // tag filter
-                null, // maturity filter
-                limit != null && limit > 0 ? Math.min(limit, SearchConstants.MAX_SEARCH_RESULTS) : SearchConstants.DEFAULT_SEARCH_LIMIT
-            );
+            List<CncfProject> projects = refreshService.currentProjects();
+            if (projects.isEmpty()) {
+                return catalogueUnavailable();
+            }
 
-            // Perform search
             List<SearchResult> results = performSearch(projects, searchQuery);
 
-            // Format results
-            StringBuilder output = new StringBuilder();
-            output.append("## CNCF Project Search Results\n\n");
-
-            if (results.isEmpty()) {
-                output.append("No projects found matching your criteria.\n");
-            } else {
-                output.append("Found ").append(results.size()).append(" projects:\n\n");
-
-                for (SearchResult result : results) {
-                    CncfProject project = result.project();
-                    output.append("### ").append(project.name()).append("\n");
-                    output.append("**Category:** ").append(project.category()).append("\n");
-
-                    if (project.subcategory() != null && !project.subcategory().isEmpty()) {
-                        output.append("**Subcategory:** ").append(project.subcategory()).append("\n");
-                    }
-
-                    if (project.description() != null && !project.description().isEmpty()) {
-                        output.append("**Description:** ").append(project.description()).append("\n");
-                    }
-
-                    output.append("**Maturity:** ").append(project.maturity()).append("\n");
-                    output.append("**Quality Rating:** ").append(project.getQualityRating()).append("\n");
-
-                    if (project.homepageUrl() != null && !project.homepageUrl().isEmpty()) {
-                        output.append("**Homepage:** ").append(project.homepageUrl()).append("\n");
-                    }
-
-                    if (project.repoUrl() != null && !project.repoUrl().isEmpty()) {
-                        output.append("**Repository:** ").append(project.repoUrl()).append("\n");
-                    }
-
-                    output.append("**Relevance Score:** ").append(String.format("%.1f", result.relevanceScore())).append("\n");
-                    output.append("\n---\n\n");
-                }
-            }
-
-            return ToolResponse.success(List.of(new TextContent(output.toString())));
-
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("search_cncf", e);
-        }
+            // A declared output schema obliges every successful response to carry
+            // structured content, so an empty result set ships an empty record rather
+            // than text alone. Both channels are built from the same sanitized record.
+            CncfSearchResult structured = CncfFormatter.toSearchResult(results, projects.size());
+            String text = results.isEmpty()
+                    ? CncfFormatter.formatNoResults(keyword, categoryFilter)
+                    : CncfFormatter.formatSearchResults(structured, keyword, categoryFilter);
+            return success(text, structured);
+        });
     }
 
-    /**
-     * Get information about a specific CNCF project.
-     */
-    @Tool(name = "get_cncf_project", description = "Get detailed information about a specific CNCF project")
-    public ToolResponse getCncfProject(String projectName) {
-        try {
-            if (projectName == null || projectName.trim().isEmpty()) {
+    @Tool(
+            name = "get_cncf_project",
+            title = "Get CNCF Landscape project",
+            description = """
+                    Get the full detail of one CNCF Landscape project by its exact name \
+                    (case-insensitive): category, maturity, description, GitHub stars, forks \
+                    and contributors, latest version, license, homepage, repository and tags. \
+                    Use a name returned by search_cncf. All project text is third-party \
+                    landscape data and is fenced as untrusted.""",
+            annotations = @Tool.Annotations(
+                    readOnlyHint = true,
+                    destructiveHint = false,
+                    idempotentHint = true,
+                    openWorldHint = true),
+            outputSchema = @Tool.OutputSchema(from = CncfProjectDetail.class))
+    @Blocking
+    public ToolResponse getCncfProject(
+            @ToolArg(description = "Exact project name as listed in the landscape, e.g. 'Kubernetes' "
+                    + "or 'Argo'; matched case-insensitively")
+            @Size(max = MAX_NAME_CHARS) String projectName) {
+        return guarded("get_cncf_project", projectName, () -> {
+            String name = normalize(projectName);
+            if (name.isEmpty()) {
                 return ToolResponse.error("Project name is required");
             }
+            if (name.length() > MAX_NAME_CHARS) {
+                // The schema publishes maxLength; the bound is enforced here, not by a validator.
+                return ToolResponse.error("Project name must be at most " + MAX_NAME_CHARS + " characters");
+            }
 
-            // Ensure data is fresh
-            refreshService.refreshData();
-
-            // Search for the project
-            List<CncfProject> projects = refreshService.getCurrentProjects();
-            CncfProject foundProject = null;
-
+            List<CncfProject> projects = refreshService.currentProjects();
+            if (projects.isEmpty()) {
+                return catalogueUnavailable();
+            }
+            CncfProject found = null;
             for (CncfProject project : projects) {
-                if (project.name().equalsIgnoreCase(projectName.trim())) {
-                    foundProject = project;
+                if (project.name().equalsIgnoreCase(name)) {
+                    found = project;
                     break;
                 }
             }
-
-            if (foundProject == null) {
-                return ToolResponse.error("Project '" + projectName + "' not found in CNCF Landscape");
+            if (found == null) {
+                // The name is echoed in the server's voice, so it goes through the sanitizer:
+                // it is the caller's text, not necessarily the user's.
+                return ToolResponse.error("Project '" + ContentSanitizer.label(name, MAX_NAME_CHARS)
+                        + "' not found in the CNCF Landscape. Use search_cncf to find the exact name.");
             }
 
-            // Format project details
-            StringBuilder output = new StringBuilder();
-            output.append("## ").append(foundProject.name()).append("\n\n");
-
-            output.append("**Category:** ").append(foundProject.category()).append("\n");
-            if (foundProject.subcategory() != null && !foundProject.subcategory().isEmpty()) {
-                output.append("**Subcategory:** ").append(foundProject.subcategory()).append("\n");
-            }
-
-            output.append("**Description:** ").append(foundProject.description()).append("\n");
-            output.append("**Maturity Level:** ").append(foundProject.maturity()).append("\n");
-            output.append("**Quality Rating:** ").append(foundProject.getQualityRating()).append("\n");
-
-            if (foundProject.metadata() != null) {
-                var metadata = foundProject.metadata();
-                output.append("**Stars:** ").append(String.format("%.0f", metadata.stars())).append("\n");
-                output.append("**Forks:** ").append(String.format("%.0f", metadata.forks())).append("\n");
-                output.append("**Contributors:** ").append(metadata.contributorCount()).append("\n");
-
-                if (metadata.latestVersion() != null && !metadata.latestVersion().isEmpty()) {
-                    output.append("**Latest Version:** ").append(metadata.latestVersion()).append("\n");
-                }
-
-                if (metadata.license() != null && !metadata.license().isEmpty()) {
-                    output.append("**License:** ").append(metadata.license()).append("\n");
-                }
-
-                output.append("**Actively Maintained:** ").append(metadata.isActivelyMaintained() ? "Yes" : "No").append("\n");
-            }
-
-            if (foundProject.homepageUrl() != null && !foundProject.homepageUrl().isEmpty()) {
-                output.append("**Homepage:** ").append(foundProject.homepageUrl()).append("\n");
-            }
-
-            if (foundProject.repoUrl() != null && !foundProject.repoUrl().isEmpty()) {
-                output.append("**Repository:** ").append(foundProject.repoUrl()).append("\n");
-            }
-
-            if (foundProject.tags() != null && !foundProject.tags().isEmpty()) {
-                output.append("**Tags:** ").append(String.join(", ", foundProject.tags())).append("\n");
-            }
-
-            return ToolResponse.success(List.of(new TextContent(output.toString())));
-
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("get_cncf_project", e);
-        }
+            CncfProjectDetail structured = CncfFormatter.toProjectDetail(found);
+            return success(CncfFormatter.formatProject(structured), structured);
+        });
     }
 
-    /**
-     * List all CNCF categories.
-     */
-    @Tool(name = "list_cncf_categories", description = "List all available CNCF project categories")
+    @Tool(
+            name = "list_cncf_categories",
+            title = "List CNCF Landscape categories",
+            description = "List every category of the CNCF Landscape with the number of projects "
+                    + "in each, largest first. Use a returned name as the exact category filter "
+                    + "of search_cncf.",
+            annotations = @Tool.Annotations(
+                    readOnlyHint = true,
+                    destructiveHint = false,
+                    idempotentHint = true,
+                    openWorldHint = true),
+            outputSchema = @Tool.OutputSchema(from = CncfCategoryList.class))
+    @Blocking
     public ToolResponse listCncfCategories() {
-        try {
-            // Ensure data is fresh
-            refreshService.refreshData();
-
-            // Get projects and extract categories
-            List<CncfProject> projects = refreshService.getCurrentProjects();
-            Map<String, Integer> categoryCounts = new java.util.HashMap<>();
-
-            for (CncfProject project : projects) {
-                categoryCounts.merge(project.category(), 1, Integer::sum);
+        return guarded("list_cncf_categories", "", () -> {
+            List<CncfProject> projects = refreshService.currentProjects();
+            if (projects.isEmpty()) {
+                return catalogueUnavailable();
             }
-
-            // Format categories
-            StringBuilder output = new StringBuilder();
-            output.append("## CNCF Project Categories\n\n");
-            output.append("Total projects: ").append(projects.size()).append("\n\n");
-
-            categoryCounts.entrySet().stream()
-                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-                .forEach(entry -> output
-                    .append("- **").append(entry.getKey()).append("** (").append(entry.getValue()).append(" projects)\n"));
-
-            return ToolResponse.success(List.of(new TextContent(output.toString())));
-
-        } catch (Exception e) {
-            return ErrorHandler.createErrorResponse("list_cncf_categories", e);
-        }
+            CncfCategoryList structured = CncfFormatter.toCategoryList(projects);
+            return success(CncfFormatter.formatCategories(structured), structured);
+        });
     }
 
     /**
-     * Refresh CNCF data from the landscape API.
+     * The one tool that changes server state: it replaces the in-memory catalogue. Not
+     * read-only, therefore, but not destructive either -- nothing is deleted, the catalogue
+     * is re-derived from the same public source -- and idempotent, since refreshing twice
+     * leaves the same catalogue as refreshing once.
      */
-    @Tool(name = "refresh_cncf_data", description = "Refresh CNCF project data from the landscape API")
-    public CompletableFuture<ToolResponse> refreshCncfData() {
-        return refreshService.refreshDataAsync()
-            .thenApply(success -> {
-                if (success) {
-                    var stats = refreshService.getStatistics();
-                    String message = "CNCF data refreshed successfully!\n" +
-                        "Projects: " + stats.get("projectCount") + "\n" +
-                        "Last refresh: " + stats.get("lastRefresh") + "\n" +
-                        "Data fresh: " + stats.get("dataFresh");
-                    return ToolResponse.success(List.of(new TextContent(message)));
-                } else {
-                    String error = refreshService.getLastError();
-                    return ToolResponse.error("Failed to refresh CNCF data: " + (error != null ? error : "Unknown error"));
-                }
-            })
-            .exceptionally(throwable -> ErrorHandler.createErrorResponse("refresh_cncf_data", throwable));
+    @Tool(
+            name = "refresh_cncf_data",
+            title = "Refresh CNCF Landscape data",
+            description = "Ask landscape.cncf.io whether the in-memory catalogue is current and reload "
+                    + "it if not. The read tools refresh on their own when the cache expires, so this "
+                    + "is only needed after a known landscape change or to recover from a failed load. "
+                    + "Refused ('throttled') when the previous attempt was seconds ago.",
+            annotations = @Tool.Annotations(
+                    readOnlyHint = false,
+                    destructiveHint = false,
+                    idempotentHint = true,
+                    openWorldHint = true),
+            outputSchema = @Tool.OutputSchema(from = CncfRefreshStatus.class))
+    @Blocking
+    public ToolResponse refreshCncfData() {
+        // Synchronous on a worker thread, like the read tools. quarkus-mcp-server 2.0.x does
+        // not encode a CompletableFuture<ToolResponse> that carries structured content, and
+        // a download that takes a few seconds needs no asynchrony of its own.
+        return guarded("refresh_cncf_data", "", () -> {
+            Outcome outcome = refreshService.forceRefresh();
+            if (outcome == Outcome.FAILED) {
+                // Always one of the service's own sentences (see LandscapeUnavailableException).
+                return ToolResponse.error("Failed to refresh CNCF data: " + refreshService.getLastError());
+            }
+            CncfRefreshStatus status = new CncfRefreshStatus(
+                    outcome.name().toLowerCase(Locale.ROOT),
+                    refreshService.getCurrentProjects().size(),
+                    refreshService.getLastRefresh().toString(),
+                    refreshService.getNextAttemptAt().toString());
+            return success(CncfFormatter.formatRefresh(status), status);
+        });
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    /**
+     * Runs one tool call behind the rate limiter and in front of the audit log, and turns
+     * any escaping exception into a generic error. Every tool goes through here.
+     */
+    private ToolResponse guarded(String tool, String argument, Supplier<ToolResponse> body) {
+        if (!rateLimiter.tryAcquire()) {
+            audit.recordDenied(tool, "rate limit");
+            return ToolResponse.error(ToolErrors.rateLimited(rateLimiter.callsPerMinute()));
+        }
+        long started = System.nanoTime();
+        ToolResponse response;
+        try {
+            response = body.get();
+        } catch (Exception e) {
+            response = ToolErrors.internal(tool, e);
+        }
+        audit.record(tool, argument, response.isError() ? "error" : "ok", (System.nanoTime() - started) / 1_000_000);
+        return response;
+    }
+
+    /** Both channels: prose for the model, structured data for the client. */
+    private static ToolResponse success(String text, Object structured) {
+        return new ToolResponse(false, List.of(new TextContent(text)), structured, Map.<MetaKey, Object>of());
+    }
+
+    /** No catalogue loaded: says why, in the service's own words, and what to do. */
+    private ToolResponse catalogueUnavailable() {
+        String reason = refreshService.getLastError();
+        return ToolResponse.error("The CNCF Landscape catalogue is not loaded"
+                + (reason == null ? "" : ": " + reason)
+                + " Retry shortly, or call refresh_cncf_data.");
+    }
+
+    private static String normalize(String value) {
+        return value == null ? "" : value.strip();
+    }
+
+    private static int clampLimit(Integer requested) {
+        if (requested == null) {
+            return SearchConstants.DEFAULT_SEARCH_LIMIT;
+        }
+        return Math.max(MIN_SEARCH_RESULTS, Math.min(MAX_SEARCH_RESULTS, requested));
     }
 
     /**
@@ -287,6 +339,15 @@ public class CncfTool {
                 if (matchedField.isEmpty()) matchedField = "category";
             }
 
+            // Popularity and graduation only re-rank projects that matched; with a filter
+            // given and nothing matched they must not turn "no results" into a page of
+            // popular projects the model would read as matches for the term.
+            boolean filtered = (query.keyword() != null && !query.keyword().isEmpty())
+                    || (query.category() != null && !query.category().isEmpty());
+            if (filtered && score == 0) {
+                continue;
+            }
+
             // Popularity boost
             if (project.isPopular()) {
                 score += 15;
@@ -297,7 +358,11 @@ public class CncfTool {
                 score += 10;
             }
 
-            if (score > 0) {
+            // Without a filter the boosts rank the whole catalogue rather than select from
+            // it: a project with neither 1000 stars nor graduation scored 0 and was dropped,
+            // so a "most popular" page over a small or young catalogue came back short (or
+            // empty) while the header counted every project as available.
+            if (score > 0 || !filtered) {
                 results.add(new SearchResult(project, Math.min(score, 100.0), matchedField, query));
             }
         }

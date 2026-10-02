@@ -1,0 +1,45 @@
+####
+# CNCF Tech Advisor MCP Server - native executable on the Quarkus micro base image.
+#
+# Same contract as Dockerfile.native, on a smaller base: the micro image carries only the
+# shared libraries a Quarkus native executable links against (glibc, libstdc++, zlib) plus
+# CA certificates -- no shell, no package manager, no curl. See
+# https://quarkus.io/guides/quarkus-runtime-base-image for what it contains and why.
+#
+#   ./mvnw package -Pnative -DskipTests
+#   docker build -f src/main/docker/Dockerfile.native-micro -t cncf-tech-advisor-mcp:native-micro .
+#   docker run -i --rm -p 127.0.0.1:8080:8080 cncf-tech-advisor-mcp:native-micro
+#
+# Choose this one when the image is scanned and shipped as an appliance; choose
+# Dockerfile.native when operators expect to `kubectl exec` into a shell.
+#
+# `2.0` is the only tag the Quarkus team publishes as stable; the dated `2.0-YYYY-MM-DD`
+# tags are its rebuilds. It is a floating tag, so an image scanner in CI is what pins the
+# content in practice.
+####
+FROM quay.io/quarkus/ubi9-quarkus-micro-image:2.0
+
+LABEL io.modelcontextprotocol.server.name="io.github.labjp-mcp/cncf-tech-advisor-mcp"
+LABEL io.k8s.display-name="CNCF Tech Advisor MCP Server (native, micro)"
+LABEL io.openshift.tags="mcp,cncf,kubernetes,landscape,technology-advisor,quarkus,native"
+LABEL maintainer="Jean Lopez"
+LABEL description="MCP Server for CNCF Landscape Technology Data (native executable, micro base)"
+
+WORKDIR /work/
+RUN chown 1001 /work \
+    && chmod "g+rwX" /work \
+    && chown 1001:root /work
+
+COPY --chown=1001:root --chmod=0755 target/*-runner /work/application
+
+EXPOSE 8080
+USER 1001
+
+ENV QUARKUS_HTTP_HOST=0.0.0.0 \
+    QUARKUS_HTTP_PORT=8080 \
+    QUARKUS_HTTP_HOST_ENABLED=true \
+    QUARKUS_MCP_SERVER_STDIO_ENABLED=false
+
+# No HEALTHCHECK: there is no shell or curl in this image to run one. Use the
+# orchestrator's probes (tcpSocket on the http port).
+ENTRYPOINT ["./application"]

@@ -1,73 +1,76 @@
 # =============================================================================
-# MCP CNCF Tech Advisor Server - Quarkus Native Multi-stage Build
+# CNCF Tech Advisor MCP Server - JVM Multi-stage Build
 # =============================================================================
-# Builds a native executable using Mandrel (Red Hat's GraalVM distribution)
-# and deploys on the smallest possible image (ubi9-quarkus-micro-image)
+# The JVM image. The native executable has its own images under src/main/docker/
+# (Dockerfile.native on UBI minimal, Dockerfile.native-micro on the Quarkus micro base),
+# which package a binary compiled on the host or in CI rather than compiling in a stage:
+# that keeps one compilation feeding the tests, the JVM/native parity check and both
+# images. Same layout as mcp-redhat-kb.
 #
 # Build:
-#   docker build -t ghcr.io/jeanlopezxyz/cncf-tech-advisor .
+#   docker build -t cncf-tech-advisor-mcp .
 #
 # Run:
-#   docker run -i --rm -p 8080:8080 ghcr.io/jeanlopezxyz/cncf-tech-advisor
+#   docker run -i --rm -p 127.0.0.1:8080:8080 cncf-tech-advisor-mcp
 #
-# Image size: ~50-100MB (vs ~400MB with JVM)
-# Startup time: ~50ms (vs ~2s with JVM)
+# The port is published on loopback in the example on purpose: this image binds 0.0.0.0
+# and carries no authentication of its own. Put a network boundary in front of it.
 # =============================================================================
 
-# Stage 1: Build Native Executable
-FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25 AS build
+# Stage 1: Build
+FROM registry.access.redhat.com/ubi9/openjdk-25:1.24 AS build
+
+USER root
+RUN microdnf install -y gzip tar && microdnf clean all
+USER 185
 
 WORKDIR /build
 
-# Copy all source files
-COPY --chown=quarkus:quarkus mvnw .
-COPY --chown=quarkus:quarkus .mvn .mvn
-COPY --chown=quarkus:quarkus pom.xml .
-COPY --chown=quarkus:quarkus src src
+# Copy Maven wrapper and pom.xml first (for layer caching)
+COPY --chown=185 mvnw .
+COPY --chown=185 .mvn .mvn
+COPY --chown=185 pom.xml .
 
-# Build native executable (single step to avoid permission issues)
-USER quarkus
-RUN ./mvnw package -DskipTests -Dnative -B
+# Download dependencies (cached if pom.xml unchanged)
+RUN ./mvnw dependency:go-offline -B
 
-# Stage 2: Runtime (Micro Image - smallest possible)
-FROM quay.io/quarkus/ubi9-quarkus-micro-image:2.0
+# Copy source code
+COPY --chown=185 src src
 
+# Build the application, running the tests as a gate. CI passes -DskipTests: its test job
+# has already run them on three platforms, and under arm64 emulation the timing-sensitive
+# HTTP tests time out without telling anything about the code.
+ARG MAVEN_BUILD_ARGS=""
+RUN ./mvnw package -B ${MAVEN_BUILD_ARGS}
+
+# Stage 2: Runtime
+FROM registry.access.redhat.com/ubi9/openjdk-25:1.24
+
+LABEL io.modelcontextprotocol.server.name="io.github.labjp-mcp/cncf-tech-advisor-mcp"
+LABEL io.k8s.display-name="CNCF Tech Advisor MCP Server"
+LABEL io.openshift.tags="mcp,cncf,kubernetes,landscape,technology-advisor,quarkus"
 LABEL maintainer="Jean Lopez"
-LABEL description="MCP Server for CNCF Landscape Technology Data (Native)"
-LABEL io.k8s.display-name="MCP CNCF Tech Advisor Server"
-LABEL io.openshift.tags="mcp,cncf,kubernetes,landscape,technology-advisor,quarkus,native"
+LABEL description="MCP Server for CNCF Landscape Technology Data (JVM)"
 
-WORKDIR /work/
-
-# Setup permissions
-RUN chown 1001 /work \
-    && chmod "g+rwX" /work \
-    && chown 1001:root /work
-
-# Copy native executable from build stage
-COPY --from=build --chown=1001:root --chmod=0755 /build/target/*-runner /work/application
+# Copy the built application from build stage
+COPY --from=build --chown=185 /build/target/quarkus-app/lib/ /deployments/lib/
+COPY --from=build --chown=185 /build/target/quarkus-app/*.jar /deployments/
+COPY --from=build --chown=185 /build/target/quarkus-app/app/ /deployments/app/
+COPY --from=build --chown=185 /build/target/quarkus-app/quarkus/ /deployments/quarkus/
 
 EXPOSE 8080
 
-USER 1001
+USER 185
 
-# Environment variables for MCP HTTP transports
-ENV QUARKUS_HTTP_HOST=0.0.0.0
-ENV QUARKUS_HTTP_PORT=8080
+# A container serves the HTTP transport: the port must be reachable from outside the
+# network namespace, and stdio (the default for a locally launched process) is switched
+# off because nothing is attached to the container's stdin. Both are runtime properties,
+# so a `docker run -e` override still wins.
+ENV QUARKUS_HTTP_HOST=0.0.0.0 \
+    QUARKUS_HTTP_PORT=8080 \
+    QUARKUS_HTTP_HOST_ENABLED=true \
+    QUARKUS_MCP_SERVER_STDIO_ENABLED=false
 
-# MCP Transport Configuration (required for HTTP/SSE testing)
-# Streamable HTTP: http://localhost:8080/mcp
-# SSE: http://localhost:8080/mcp/sse
-ENV QUARKUS_MCP_SERVER_HTTP_ROOT_PATH=/mcp
-ENV QUARKUS_MCP_SERVER_STDIO_ENABLED=false
-ENV QUARKUS_MCP_SERVER_HTTP_STREAMABLE_ENABLED=true
-ENV QUARKUS_MCP_SERVER_HTTP_SSE_ENABLED=true
-
-# CNCF Tech Advisor Configuration
-ENV QUARKUS_REST_CLIENT_CNCFLANDSCAPEAPI_URL=https://landscape.cncf.io
-
-# CORS for Streamable HTTP
-ENV QUARKUS_HTTP_CORS=true
-ENV QUARKUS_HTTP_CORS_ORIGINS=*
-
-ENTRYPOINT ["./application"]
+ENTRYPOINT ["java", \
+    "-Djava.util.logging.manager=org.jboss.logmanager.LogManager", \
+    "-jar", "/deployments/quarkus-run.jar"]

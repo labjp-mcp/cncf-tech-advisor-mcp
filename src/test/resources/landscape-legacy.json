@@ -1,0 +1,41 @@
+{
+  "_comment": "The previous layout of full.json, still read as a fallback: metrics nested under the item as github_data (contributors as a bare number, a flat last_commit_at), a flat repo_url and latest_version. __RECENT_COMMIT__ is replaced by the test harness relative to the clock.",
+  "items": [
+    {
+      "id": "kubernetes",
+      "name": "Kubernetes",
+      "category": "Orchestration & Management",
+      "subcategory": "Scheduling & Orchestration",
+      "description": "Kubernetes is an open source system for automating deployment, scaling, and management of containerized applications.",
+      "homepage_url": "https://kubernetes.io",
+      "repo_url": "https://github.com/kubernetes/kubernetes",
+      "maturity": "graduated",
+      "latest_version": "v1.28.0",
+      "license": "Apache-2.0",
+      "oss": true,
+      "github_data": {
+        "stars": 90000,
+        "forks": 30000,
+        "contributors": 3500,
+        "license": "Apache-2.0",
+        "last_commit_at": "__RECENT_COMMIT__"
+      }
+    },
+    {
+      "id": "linkerd",
+      "name": "Linkerd",
+      "category": "Service Mesh",
+      "subcategory": "Service Mesh",
+      "description": "Linkerd is an ultralight, security-first service mesh for Kubernetes.",
+      "homepage_url": "https://linkerd.io",
+      "repo_url": "https://github.com/linkerd/linkerd2",
+      "maturity": "graduated",
+      "oss": true,
+      "github_data": {
+        "stars": 9000,
+        "contributors": 250,
+        "license": "Apache-2.0"
+      }
+    }
+  ]
+}

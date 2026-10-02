@@ -6,30 +6,60 @@
     <version>1.0.0</version>
 
     <properties>
-        <compiler-plugin.version>3.14.1</compiler-plugin.version>
+        <compiler-plugin.version>3.16.0</compiler-plugin.version>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-        <quarkus.platform.version>3.30.2</quarkus.platform.version>
-        <mcp.server.version>1.8.1</mcp.server.version>
+        <!-- 3.33.x is the current LTS line; 3.33.3.1 carried the security fixes for
+             CVE-2026-39852 (quarkus-vertx-http authorization bypass) and 3.33.3.3 is the
+             current patch of that line: an LTS emergency release (2026-09-22) closing ~30
+             transitive CVEs, most relevant here the Netty codec-http fixes for HTTP request
+             smuggling / DoS on the /mcp endpoint. Same version as mcp-redhat-kb. -->
+        <quarkus.platform.version>3.33.3.3</quarkus.platform.version>
+        <!-- 2.0.x implements MCP specification 2026-07-28 (stateless core,
+             server/discover) and is built against Quarkus 3.33.3.x, the platform line
+             pinned above. 2.0.1 (2026-09-11) is a bug-fix release on the same line: scoped
+             list-changed notifications, JSON-RPC errors for param-less completion/logging
+             requests, request context for server/discover filters. No API change. Versions
+             of the individual artifacts come from its BOM. -->
+        <quarkus-mcp-server.version>2.0.1</quarkus-mcp-server.version>
+        <jsoup.version>1.23.2</jsoup.version>
+        <!-- Must match the jsonschema-generator line quarkus-mcp-server is built against
+             (2.0.1 parent pom: 4.38.0; verified with dependency:tree): a mismatch loads two
+             copies of the generator API. 5.0.0 exists but the extension has not moved to it,
+             so it is not taken here. Check the extension's pom on upgrade. -->
+        <jsonschema-generator.version>4.38.0</jsonschema-generator.version>
+        <!-- Test-only tooling, same lines as mcp-redhat-kb. -->
+        <assertj.version>3.27.7</assertj.version>
+        <wiremock.version>3.13.2</wiremock.version>
         <skipITs>true</skipITs>
-        <surefire-plugin.version>3.5.4</surefire-plugin.version>
-
-        <!-- Java 25 Features Configuration -->
-        <java.version>25</java.version>
-        <java.enable-preview>true</java.enable-preview>
-        <maven.compiler.enable-preview>true</maven.compiler.enable-preview>
-        <maven.compiler.args>--enable-preview</maven.compiler.args>
+        <surefire-plugin.version>3.6.0</surefire-plugin.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- Ahead of the Quarkus BOM so it wins: Quarkus 3.33.3.3 ships jackson-databind
+                 2.21.6 (CVE-2026-91776, CVE-2026-91777). Drop once the platform carries 2.21.7+. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>2.21.7</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>${quarkus.platform.group-id}</groupId>
                 <artifactId>${quarkus.platform.artifact-id}</artifactId>
                 <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.quarkiverse.mcp</groupId>
+                <artifactId>quarkus-mcp-server-bom</artifactId>
+                <version>${quarkus-mcp-server.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -39,27 +69,54 @@
     <dependencies>
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-rest-jackson</artifactId>
+            <artifactId>quarkus-arc</artifactId>
         </dependency>
+        <!-- Jackson for parsing full.json. The server publishes no REST endpoint of its own
+             and no longer uses the MicroProfile REST client (replaced by java.net.http behind
+             BoundedExchange, which caps bytes and wall-clock), so neither quarkus-rest nor
+             quarkus-rest-client are on the classpath: less surface, fewer CVEs to track. -->
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-arc</artifactId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <!-- /q/health: liveness and readiness for containers and the CI integration test. -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-health</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkiverse.mcp</groupId>
             <artifactId>quarkus-mcp-server-http</artifactId>
-            <version>${mcp.server.version}</version>
         </dependency>
         <dependency>
             <groupId>io.quarkiverse.mcp</groupId>
             <artifactId>quarkus-mcp-server-stdio</artifactId>
-            <version>${mcp.server.version}</version>
+        </dependency>
+        <!-- Strips HTML from CNCF Landscape text (descriptions, names) before it reaches
+             the model. Same library and line as mcp-redhat-kb's ContentSanitizer. -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>${jsoup.version}</version>
+        </dependency>
+        <!-- Jakarta constraints on tool arguments (@Size, @Min, @Max) become maxLength /
+             minimum / maximum in the published inputSchema. Only the API is needed: no
+             validator runs at call time (the tools clamp their own input); the victools
+             module is what teaches the schema generator to read the annotations, and the
+             extension enables it automatically once it is on the classpath. Its version
+             must match the jsonschema-generator that quarkus-mcp-server 2.0.0 ships. -->
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-rest-client-jackson</artifactId>
+            <groupId>com.github.victools</groupId>
+            <artifactId>jsonschema-module-jakarta-validation</artifactId>
+            <version>${jsonschema-generator.version}</version>
         </dependency>
-                        <dependency>
+
+        <!-- Test dependencies (aligned with mcp-redhat-kb) -->
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
             <scope>test</scope>
@@ -70,8 +127,33 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- McpAssured: drives the server over the real MCP protocol in tests -->
+        <dependency>
+            <groupId>io.quarkiverse.mcp</groupId>
+            <artifactId>quarkus-mcp-server-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- AssertJ: assertions that report the actual value on failure, not just "false" -->
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- WireMock: stands in for landscape.cncf.io in tests (delays, dropped bodies, errors) -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock</artifactId>
+            <version>${wiremock.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -99,10 +181,6 @@
                 <version>${compiler-plugin.version}</version>
                 <configuration>
                     <parameters>true</parameters>
-                    <compilerArgs>
-                        <compilerArg>--enable-preview</compilerArg>
-                        <compilerArg>--enable-preview</compilerArg>
-                    </compilerArgs>
                 </configuration>
             </plugin>
             <plugin>
@@ -110,6 +188,9 @@
                 <version>${surefire-plugin.version}</version>
                 <configuration>
                     <argLine>--add-opens java.base/java.lang=ALL-UNNAMED</argLine>
+                    <!-- A build that silently runs zero tests (a misplaced source root, a
+                         filter that matches nothing) must fail, not report success. -->
+                    <failIfNoTests>true</failIfNoTests>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                         <maven.home>${maven.home}</maven.home>
@@ -139,6 +220,23 @@
     </build>
 
     <profiles>
+        <!--
+            `./mvnw package -Pnative` (or -Dnative) builds the standalone executable next to
+            the ordinary JVM package: `target/*-runner` and `target/quarkus-app/` come out
+            of the same build, which is what lets scripts/mcp-native-parity.sh compare the
+            two catalogues of one commit without a second compilation.
+
+            Native matters most for the stdio transport, where an MCP client starts the
+            process on demand and pays the JVM's startup cost on every session. Requires
+            GraalVM or Mandrel for Java 25 on the PATH; the container-based alternative
+            needs no local toolchain:
+            `./mvnw package -Pnative -Dquarkus.native.container-build=true`.
+
+            No `- -enable-preview` anywhere: the sources use no preview feature (the JVM
+            build starts without the flag), and a preview flag on native-image would only
+            make the executable refuse to run on a different JDK build. Same layout as
+            mcp-redhat-kb.
+        -->
         <profile>
             <id>native</id>
             <activation>
@@ -147,46 +245,8 @@
                 </property>
             </activation>
             <properties>
-                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
-                <skipITs>false</skipITs>
                 <quarkus.native.enabled>true</quarkus.native.enabled>
-
-                <!-- Java 25 Mandrel Native Compilation Support -->
-                <quarkus.native.java-home>${java.home}</quarkus.native.java-home>
-                <quarkus.native.native-image-xmx>4G</quarkus.native.native-image-xmx>
-                <quarkus.native.native-image-vm-args>--enable-preview</quarkus.native.native-image-vm-args>
-                <quarkus.native.additional-build-args>--enable-preview</quarkus.native.additional-build-args>
-            </properties>
-
-            <build>
-                <plugins>
-                    <plugin>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <configuration>
-                            <argLine>--enable-preview</argLine>
-                            <systemPropertyVariables>
-                                <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
-                                <maven.home>${maven.home}</maven.home>
-                            </systemPropertyVariables>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-
-        <!-- Java 25 Development Profile -->
-        <profile>
-            <id>java25-dev</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-                <property>
-                    <name>!native</name>
-                </property>
-            </activation>
-            <properties>
-                <quarkus.profile>java25</quarkus.profile>
-                <quarkus.virtual-threads.enabled>true</quarkus.virtual-threads.enabled>
-                <quarkus.structured-concurrency.enabled>true</quarkus.structured-concurrency.enabled>
+                <skipITs>false</skipITs>
             </properties>
         </profile>
     </profiles>
